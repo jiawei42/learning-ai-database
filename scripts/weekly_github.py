@@ -266,7 +266,7 @@ def claude_analyze(repo: dict, readme: str, releases: str) -> dict:
                     break  # 換下一個 model
 
             # 非 2xx → 印出 body，判斷是否換 model
-            if not resp.ok:
+            if not resp.is_success:
                 body = resp.text[:400]
                 print(f"    Claude {resp.status_code}: {body}")
 
