@@ -87,25 +87,46 @@ ${content.slice(0, 5500)}
 
 ${SCHEMA_DOC}`;
 
-  const resp = await fetch(`${GEMINI_URL}?key=${GEMINI_KEY}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: 1600, temperature: 0.2 },
-    }),
-    signal: AbortSignal.timeout(60000),
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { maxOutputTokens: 1600, temperature: 0.2 },
   });
 
-  if (!resp.ok) {
+  // 503 / 429 自動重試（最多 3 次，指數退避）
+  const RETRYABLE = new Set([429, 503, 502]);
+  const DELAYS    = [2000, 6000, 15000]; // ms
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const resp = await fetch(`${GEMINI_URL}?key=${GEMINI_KEY}`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(90000),
+    });
+
+    if (resp.ok) {
+      const data = await resp.json();
+      let raw: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      raw = raw.trim()
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
+      return JSON.parse(raw) as Record<string, unknown>;
+    }
+
     const errText = await resp.text();
-    throw new Error(`Gemini ${resp.status}: ${errText.slice(0, 200)}`);
+
+    // 可重試的錯誤
+    if (RETRYABLE.has(resp.status) && attempt < 2) {
+      await new Promise((r) => setTimeout(r, DELAYS[attempt]));
+      continue;
+    }
+
+    throw new Error(`Gemini ${resp.status}: ${errText.slice(0, 300)}`);
   }
 
-  const data = await resp.json();
-  let raw: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  raw = raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
-  return JSON.parse(raw) as Record<string, unknown>;
+  throw new Error("Gemini 重試三次均失敗");
 }
 
 // ── 驗證 Gemini 輸出 ─────────────────────────────────────────
