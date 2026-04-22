@@ -13,8 +13,8 @@ GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-REVIEW_MODEL = "gemini-2.0-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+REVIEW_MODEL = "gemini-2.5-flash"
 SAMPLE_SIZE = 8  # 每次抽查筆數（省 token）
 
 
