@@ -1,7 +1,7 @@
 """
-weekly_github.py — 每週抓 GitHub AI trending repos，用 Claude 深度分析，存入 Supabase。
+weekly_github.py — 每週抓 GitHub AI trending repos，用 Gemini 2.5 Flash 深度分析，存入 Supabase。
 執行：python scripts/weekly_github.py
-環境變數：ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
+環境變數：GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
 import os
 import json
@@ -9,13 +9,12 @@ import httpx
 from urllib.parse import quote
 from datetime import datetime, timezone
 
-ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
-SUPABASE_URL  = os.environ["SUPABASE_URL"]
-SUPABASE_KEY  = os.environ["SUPABASE_SERVICE_KEY"]
+GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
-
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"   # 最省 token，分析品質已足夠
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 SEARCH_QUERIES = [
     "AI LLM language model",
@@ -96,7 +95,7 @@ def already_exists(url: str) -> bool:
     return bool(rows)
 
 
-def claude_analyze(repo: dict, readme: str) -> dict:
+def gemini_analyze(repo: dict, readme: str) -> dict:
     prompt = f"""分析這個 GitHub AI 開源專案，用繁體中文回答。
 
 Repo: {repo['name']}
@@ -108,31 +107,26 @@ Description: {repo['description']}
 README（前 3000 字）:
 {readme or '（無 README）'}
 
-請回傳 JSON（不要其他文字）：
+嚴格 JSON 輸出（不要 markdown code fence，不要任何其他文字）：
 {{
   "summary": "一句話說明這個專案是什麼（<=80字）",
   "why_popular": "為什麼這個 repo 受歡迎，技術亮點是什麼（<=150字）",
   "architecture": "架構概述，核心技術組件（<=150字）",
   "use_case": "適合什麼場景使用（<=80字）",
-  "quality": <1-5 整體評分>
+  "quality": <1-5 整體評分，integer>
 }}"""
 
     resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        f"{GEMINI_URL}?key={GEMINI_KEY}",
+        headers={"Content-Type": "application/json"},
         json={
-            "model": CLAUDE_MODEL,
-            "max_tokens": 600,
-            "messages": [{"role": "user", "content": prompt}],
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 700, "temperature": 0.2},
         },
         timeout=60,
     )
     resp.raise_for_status()
-    raw = resp.json()["content"][0]["text"].strip()
+    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
     return json.loads(raw)
 
@@ -160,7 +154,7 @@ def main():
         print(f"\n分析: {repo['name']} ({repo['stars']:,} ⭐)")
         try:
             readme = fetch_readme(repo["readme_url"])
-            analysis = claude_analyze(repo, readme)
+            analysis = gemini_analyze(repo, readme)
 
             content_parts = []
             if analysis.get("why_popular"):
