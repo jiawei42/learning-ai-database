@@ -6,6 +6,7 @@ daily_news.py — 每天抓 10 篇 AI 新聞，用 Gemini Flash 摘要，存入 
 import os
 import json
 import httpx
+from urllib.parse import quote
 from datetime import date, datetime, timezone
 
 GEMINI_KEY    = os.environ["GEMINI_API_KEY"]
@@ -51,7 +52,17 @@ def fetch_rss_links(url: str, limit=20) -> list[dict]:
     try:
         resp = httpx.get(url, timeout=20, follow_redirects=True)
         import xml.etree.ElementTree as ET
-        root = ET.fromstring(resp.text)
+        import re
+
+        # Strip control characters that break the XML parser
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', resp.text)
+
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            # fallback: wrap in a root tag and retry
+            root = ET.fromstring(f"<root>{text}</root>")
+
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         items = []
 
@@ -138,7 +149,7 @@ def select_and_analyze(candidates: list[dict], cat_ids: dict) -> list[dict]:
 
 
 def already_exists(url: str) -> bool:
-    rows = supabase_req("GET", f"/items?url=eq.{httpx.utils.quote(url)}&select=id&limit=1")
+    rows = supabase_req("GET", f"/items?url=eq.{quote(url, safe='')}&select=id&limit=1")
     return bool(rows)
 
 
