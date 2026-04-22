@@ -177,36 +177,46 @@ def fetch_releases(full_name: str) -> str:
 
 
 # ── Claude 分析 ────────────────────────────────────────────────────────────────
-_ANALYSIS_PROMPT = """\
-你是 AI 技術策展人，請深度分析以下 GitHub 開源專案並用**繁體中文**撰寫知識卡片。
-
-## 專案基本資訊
-- **名稱**: {full_name}
-- **Stars**: {stars:,} ⭐  Forks: {forks:,}
-- **語言**: {language}
-- **License**: {license}
-- **Topics**: {topics}
-- **描述**: {description}
-
-## README（前 6000 字）
-{readme}
-
-## 最新 Release Notes
-{releases}
-
----
-
+_ANALYSIS_SCHEMA = """
 嚴格 JSON 輸出（不要 markdown code fence，不要任何其他文字）：
-{{
-  "title":       <string, 直接用 "{full_name}" 即可>,
+{
+  "title":       <string, 直接用專案全名即可>,
   "summary":     <string, 繁體中文一句話說明這個專案（30–80字）>,
   "highlights":  <string, 3–5 個技術亮點，Markdown 條列格式（- 開頭），每點 20–50 字>,
   "architecture":<string, 架構概述：核心技術組件、設計模式、與其他工具整合方式（50–150字）>,
   "use_case":    <string, 最適合的使用場景，舉具體例子（30–80字）>,
   "compared_to": <string, 與同類工具相比的差異或優勢（30–80字），若無明顯對比則留空字串>,
   "quality":     <integer, 1–5（5=AI 領域必知、極具影響力；4=值得收藏；3=普通）>
-}}
+}
 """
+
+
+def build_prompt(repo: dict, readme: str, releases: str) -> str:
+    """
+    用字串拼接而非 .format()，避免 README/release notes 中的
+    大括號 { } 被 Python format engine 誤判為 template key。
+    """
+    lines = [
+        "你是 AI 技術策展人，請深度分析以下 GitHub 開源專案並用**繁體中文**撰寫知識卡片。",
+        "",
+        "## 專案基本資訊",
+        f"- **名稱**: {repo['full_name']}",
+        f"- **Stars**: {repo['stars']:,} ⭐  Forks: {repo['forks']:,}",
+        f"- **語言**: {repo['language']}",
+        f"- **License**: {repo['license'] or '未知'}",
+        f"- **Topics**: {', '.join(repo['topics'][:15]) or '（無）'}",
+        f"- **描述**: {repo['description'] or '（無描述）'}",
+        "",
+        "## README（前 6000 字）",
+        readme or "（無 README）",
+        "",
+        "## 最新 Release Notes",
+        releases or "（無 Release）",
+        "",
+        "---",
+        _ANALYSIS_SCHEMA,
+    ]
+    return "\n".join(lines)
 
 # 可 retry 的暫時性錯誤（過載/限流）
 _RETRYABLE = {429, 503, 529}
@@ -216,23 +226,12 @@ _INVALID_MODEL = {400, 404}
 
 def claude_analyze(repo: dict, readme: str, releases: str) -> dict:
     """
-    Fallback chain：依序試 CLAUDE_MODELS，
-    - 400 / 404 → model 不存在，換下一個
-    - 429 / 503 / 529 → 暫時過載，同 model 重試（最多 3 次）
-    - 其他 HTTP 錯誤 → 換下一個
+    Fallback chain：依序試 CLAUDE_MODELS。
+    - 429/503/529（過載）→ 同 model retry（最多 3 次，5/15/40s backoff）
+    - 400（model 不存在的特定訊息）→ 換下一個
+    - 其他 400（request 格式錯誤）→ 直接 raise，不換 model
     """
-    prompt = _ANALYSIS_PROMPT.format(
-        full_name=repo["full_name"],
-        stars=repo["stars"],
-        forks=repo["forks"],
-        language=repo["language"],
-        license=repo["license"] or "未知",
-        topics=", ".join(repo["topics"][:15]) or "（無）",
-        description=repo["description"] or "（無描述）",
-        readme=readme or "（無 README）",
-        releases=releases or "（無 Release）",
-    )
-
+    prompt = build_prompt(repo, readme, releases)
     last_error = "（未嘗試）"
 
     for model in CLAUDE_MODELS:
@@ -240,56 +239,60 @@ def claude_analyze(repo: dict, readme: str, releases: str) -> dict:
         retry_delays = [5, 15, 40]
 
         for attempt in range(3):
-            try:
-                resp = httpx.post(
-                    CLAUDE_URL,
-                    headers={
-                        "x-api-key":         ANTHROPIC_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type":      "application/json",
-                    },
-                    json={
-                        "model":      model,
-                        "max_tokens": 1200,
-                        "messages":   [{"role": "user", "content": prompt}],
-                    },
-                    timeout=90,
-                )
+            resp = httpx.post(
+                CLAUDE_URL,
+                headers={
+                    "x-api-key":         ANTHROPIC_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type":      "application/json",
+                },
+                json={
+                    "model":      model,
+                    "max_tokens": 1200,
+                    "messages":   [{"role": "user", "content": prompt}],
+                },
+                timeout=90,
+            )
 
-                # Model 不存在 → 換下一個
-                if resp.status_code in _INVALID_MODEL:
-                    last_error = f"{model} → {resp.status_code} Invalid"
-                    print(f"    ✗ {last_error}，換下一個")
-                    break  # 跳出 retry loop，進入下一個 model
-
-                # 暫時過載 → 同 model retry
-                if resp.status_code in _RETRYABLE and attempt < 2:
+            # 暫時過載 → 同 model retry
+            if resp.status_code in _RETRYABLE:
+                if attempt < 2:
                     wait = retry_delays[attempt]
                     print(f"    Claude {resp.status_code}，等待 {wait}s 後重試...")
                     time.sleep(wait)
                     continue
+                else:
+                    last_error = f"{model} 過載超過重試次數"
+                    break  # 換下一個 model
 
-                resp.raise_for_status()
+            # 非 2xx → 印出 body，判斷是否換 model
+            if not resp.ok:
+                body = resp.text[:400]
+                print(f"    Claude {resp.status_code}: {body}")
 
-                # ✅ 成功
-                raw = resp.json()["content"][0]["text"].strip()
-                raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
-                raw = re.sub(r"^```\s*", "", raw)
-                raw = re.sub(r"```\s*$", "", raw).strip()
-                result = json.loads(raw)
-                result["_model_used"] = model  # 記錄實際用的 model
-                print(f"    ✓ 使用模型：{model}")
-                return result
-
-            except httpx.HTTPStatusError as e:
-                last_error = f"{model} HTTP {e.response.status_code}"
-                if attempt == 2:
-                    print(f"    ✗ {last_error}，換下一個")
+                # 只有明確 "model not found/supported" 才換下一個
+                if resp.status_code in {400, 404} and any(
+                    kw in body.lower()
+                    for kw in ("model", "not found", "not support", "invalid model", "unknown model")
+                ):
+                    last_error = f"{model} → {resp.status_code} model not found"
+                    print(f"    ✗ Model 不存在，換下一個")
                     break
-                time.sleep(retry_delays[attempt])
 
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"Claude JSON 解析失敗（{model}）: {e}")
+                # 其他 400（API key 錯、格式錯、content policy）→ 直接 raise
+                raise RuntimeError(
+                    f"Claude {resp.status_code} ({model}): {body}"
+                )
+
+            # ✅ 成功
+            raw = resp.json()["content"][0]["text"].strip()
+            raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"^```\s*", "", raw)
+            raw = re.sub(r"```\s*$", "", raw).strip()
+            result = json.loads(raw)
+            result["_model_used"] = model
+            print(f"    ✓ 使用模型：{model}")
+            return result
 
     raise RuntimeError(f"所有 Claude 模型均失敗，最後錯誤：{last_error}")
 
