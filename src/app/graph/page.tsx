@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import type { Item, ItemRelation, Category } from "@/types/database";
+import type { Item, ItemRelation } from "@/types/database";
 
 const TYPE_COLORS = {
   news:  { border: "#0ea5e9", bg: "#1e3a5f" },
@@ -16,7 +16,8 @@ export default function GraphPage() {
   const [selected, setSelected] = useState<Item | null>(null);
 
   useEffect(() => {
-    let network: import("vis-network").Network | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let network: any = null;
 
     async function init() {
       const [{ data: items }, { data: relations }, { data: categories }] = await Promise.all([
@@ -30,48 +31,50 @@ export default function GraphPage() {
         return;
       }
 
-      const catMap = Object.fromEntries(
-        (categories ?? []).map((c: Category) => [c.id, c])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const catMap: Record<string, any> = Object.fromEntries(
+        (categories ?? []).map((c) => [c.id, c])
       );
 
-      const { DataSet } = await import("vis-data");
-      const { Network } = await import("vis-network");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { DataSet } = await import("vis-data") as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { Network } = await import("vis-network") as any;
 
-      const nodes = new DataSet(
-        (items as Item[]).map((item) => {
-          const cat = item.category_id ? catMap[item.category_id] : null;
-          const colors = TYPE_COLORS[item.type] ?? TYPE_COLORS.note;
-          return {
-            id: item.id,
-            label: item.title.length > 30 ? item.title.slice(0, 28) + "…" : item.title,
-            title: item.summary ?? item.title,
-            color: {
-              background: cat ? cat.color + "33" : colors.bg,
-              border: cat ? cat.color : colors.border,
-              highlight: { background: colors.bg, border: colors.border },
-              hover: { background: colors.bg, border: colors.border },
-            },
-            font: { color: "#e8e8f0", size: 12, face: "Inter, sans-serif" },
-            shape: item.type === "repo" ? "diamond" : item.type === "news" ? "dot" : "box",
-            size: item.type === "repo" ? 14 : 10,
-            borderWidth: 1.5,
-            _data: item,
-          };
-        })
-      );
+      const nodeData = (items as Item[]).map((item) => {
+        const cat = item.category_id ? catMap[item.category_id] : null;
+        const colors = TYPE_COLORS[item.type as keyof typeof TYPE_COLORS] ?? TYPE_COLORS.note;
+        return {
+          id: item.id,
+          label: item.title.length > 30 ? item.title.slice(0, 28) + "…" : item.title,
+          title: item.summary ?? item.title,
+          color: {
+            background: cat ? cat.color + "33" : colors.bg,
+            border: cat ? cat.color : colors.border,
+            highlight: { background: colors.bg, border: colors.border },
+            hover: { background: colors.bg, border: colors.border },
+          },
+          font: { color: "#e8e8f0", size: 12, face: "Inter, sans-serif" },
+          shape: item.type === "repo" ? "diamond" : item.type === "news" ? "dot" : "box",
+          size: item.type === "repo" ? 14 : 10,
+          borderWidth: 1.5,
+          _data: item,
+        };
+      });
 
-      const edges = new DataSet(
-        (relations as ItemRelation[]).map((r) => ({
-          from: r.source_id,
-          to: r.target_id,
-          color: { color: "#3a3a52", highlight: "#6366f1" },
-          width: 1,
-          label: r.relation_type !== "related" ? r.relation_type : undefined,
-          font: { color: "#9898b0", size: 10 },
-          arrows: { to: { enabled: true, scaleFactor: 0.5 } },
-          smooth: { type: "curvedCW", roundness: 0.2 },
-        }))
-      );
+      const edgeData = (relations as ItemRelation[]).map((r) => ({
+        from: r.source_id,
+        to: r.target_id,
+        color: { color: "#3a3a52", highlight: "#6366f1" },
+        width: 1,
+        label: r.relation_type !== "related" ? r.relation_type : undefined,
+        font: { color: "#9898b0", size: 10 },
+        arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+        smooth: { type: "curvedCW", roundness: 0.2 },
+      }));
+
+      const nodes = new DataSet(nodeData);
+      const edges = new DataSet(edgeData);
 
       setStats({ nodes: nodes.length, edges: edges.length });
 
@@ -95,10 +98,12 @@ export default function GraphPage() {
         }
       );
 
-      network.on("click", (params) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      network.on("click", (params: any) => {
         if (params.nodes.length > 0) {
-          const node = nodes.get(params.nodes[0]) as { _data: Item } & object;
-          if (node) setSelected((node as { _data: Item })._data as Item);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const node = nodes.get(params.nodes[0]) as any;
+          if (node) setSelected(node._data as Item);
         } else {
           setSelected(null);
         }
