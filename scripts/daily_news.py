@@ -15,13 +15,13 @@ GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 NEWS_SOURCES = [
     "https://hnrss.org/newest?q=AI+LLM&count=30",
     "https://hnrss.org/newest?q=machine+learning&count=20",
-    "https://www.reddit.com/r/MachineLearning/.rss",
-    "https://www.reddit.com/r/LocalLLaMA/.rss",
+    "https://hnrss.org/newest?q=GPT+Claude+Gemini&count=20",
+    "https://tldr.tech/ai/rss",
 ]
 
 CATEGORY_SLUGS = ["ai-models", "tools-frameworks", "research", "industry", "open-source"]
