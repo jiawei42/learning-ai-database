@@ -15,7 +15,7 @@ GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
 NEWS_SOURCES = [
     "https://hnrss.org/newest?q=AI+LLM&count=30",
@@ -70,10 +70,10 @@ def fetch_rss_links(url: str, limit: int = 25) -> list[dict]:
 
 
 # ── Gemini with retry ────────────────────────────────────────
-def gemini(prompt: str, retries: int = 3) -> str:
+def gemini(prompt: str, retries: int = 4) -> str:
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1024, "temperature": 0.3},
+        "generationConfig": {"maxOutputTokens": 800, "temperature": 0.3},
     }
     for attempt in range(retries):
         try:
@@ -83,8 +83,8 @@ def gemini(prompt: str, retries: int = 3) -> str:
                 timeout=90,
             )
             if resp.status_code == 429:
-                wait = 30 * (attempt + 1)
-                print(f"  Gemini 429，等待 {wait}s 後重試...")
+                wait = 60 * (attempt + 1)   # 60s / 120s / 180s / 240s
+                print(f"  Gemini 429，等待 {wait}s 後重試 ({attempt+1}/{retries})...")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -92,15 +92,17 @@ def gemini(prompt: str, retries: int = 3) -> str:
         except httpx.HTTPStatusError as e:
             if attempt == retries - 1:
                 raise
-            print(f"  Gemini 錯誤 {e}，重試...")
-            time.sleep(15)
+            print(f"  Gemini 錯誤 {e.response.status_code}，重試...")
+            time.sleep(30)
     raise RuntimeError("Gemini 請求失敗，已超過重試次數")
 
 
 # ── Main logic ───────────────────────────────────────────────
 def select_and_analyze(candidates: list[dict], cat_ids: dict) -> list[dict]:
+    # 限制 15 篇以縮小 prompt，節省 token
+    candidates = candidates[:15]
     candidate_json = json.dumps(
-        [{"i": i, "title": c["title"], "snippet": c["snippet"][:150]}
+        [{"i": i, "title": c["title"], "snippet": c["snippet"][:80]}
          for i, c in enumerate(candidates)],
         ensure_ascii=False,
     )
@@ -173,7 +175,24 @@ def main():
         return
 
     # Gemini select + summarize
-    articles = select_and_analyze(new_candidates[:40], cat_ids)
+    try:
+        articles = select_and_analyze(new_candidates, cat_ids)
+    except Exception as e:
+        print(f"\nGemini 失敗（{e}），使用 fallback：直接存前 10 篇原始標題")
+        articles = [
+            {
+                "type": "news",
+                "title": c["title"],
+                "url": c["url"],
+                "summary": c["snippet"][:200] or None,
+                "category_id": None,
+                "source": "Daily AI News",
+                "quality": 3,
+                "is_pinned": False,
+                "metadata": {"fetched_at": datetime.now(timezone.utc).isoformat(), "ai_processed": False},
+            }
+            for c in new_candidates[:10]
+        ]
 
     # Insert
     inserted = 0
