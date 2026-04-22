@@ -26,10 +26,14 @@ GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta"
-    "/models/gemini-2.5-flash:generateContent"
-)
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Fallback chain：全免費
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
 
 MAX_NEWS      = 10    # 一般新聞上限（Priority 不計）
 DUP_THRESHOLD = 0.65  # 標題相似度閾值
@@ -168,48 +172,71 @@ def check_duplicate(url: str, title: str) -> tuple[bool, bool, str | None]:
     return False, False, None
 
 
-# ── Gemini 呼叫 ────────────────────────────────────────────────────────────────
+# ── Gemini 呼叫（三模型 fallback，全免費）────────────────────────────────────
+def _extract_text(resp_json: dict) -> str:
+    """安全地從 Gemini response 取出文字，避免 KeyError。"""
+    try:
+        return resp_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"Gemini response 結構異常: {e} | {str(resp_json)[:200]}")
+
+
 def call_gemini(
     prompt: str,
     use_search: bool = False,
     max_tokens: int = 2048,
-    retries: int = 3,
 ) -> str:
+    """
+    依序試 GEMINI_MODELS（fallback chain）。
+    - 503/429 → 同 model retry（最多 3 次，10/30/60s backoff）
+    - 404 → model 不存在，換下一個
+    - use_search=True 時只用第一個支援 Search 的 model（2.x+）
+    """
     payload: dict = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": 0.2,
-        },
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
     }
     if use_search:
-        # Google Search Grounding — 讓 Gemini 真正上網搜尋
         payload["tools"] = [{"google_search": {}}]
 
-    for attempt in range(retries):
-        try:
-            resp = httpx.post(
-                f"{GEMINI_URL}?key={GEMINI_KEY}",
-                json=payload, timeout=120,
-            )
-            if resp.status_code == 429:
-                wait = 60 * (attempt + 1)
-                print(f"  Gemini 429，等待 {wait}s... ({attempt + 1}/{retries})")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except httpx.HTTPStatusError as e:
-            if attempt == retries - 1:
-                raise
-            print(f"  Gemini HTTP {e.response.status_code}，重試...")
-            time.sleep(20)
-        except Exception as e:
-            if attempt == retries - 1:
-                raise
-            print(f"  Gemini 錯誤: {e}，重試...")
-            time.sleep(20)
-    raise RuntimeError("Gemini 超過重試次數")
+    retry_delays = [10, 30, 60]
+    last_error = "（未嘗試）"
+
+    for model in GEMINI_MODELS:
+        # gemini-1.5 不支援 google_search grounding，跳過
+        if use_search and model.startswith("gemini-1.5"):
+            continue
+
+        url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
+
+        for attempt in range(3):
+            resp = httpx.post(url, json=payload, timeout=120)
+
+            # 過載 / 限流 → 重試
+            if resp.status_code in {429, 503}:
+                if attempt < 2:
+                    wait = retry_delays[attempt]
+                    print(f"  Gemini {model} {resp.status_code}，等待 {wait}s...")
+                    time.sleep(wait)
+                    continue
+                last_error = f"{model} 過載超過重試次數"
+                break
+
+            # model 不存在 → 換下一個
+            if resp.status_code == 404:
+                last_error = f"{model} 404 not found"
+                print(f"  Gemini {model} 不存在，換下一個")
+                break
+
+            # 其他非 2xx
+            if not resp.is_success:
+                body = resp.text[:300]
+                raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
+
+            # ✅ 成功
+            return _extract_text(resp.json())
+
+    raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
 
 
 def parse_json_from_text(raw: str) -> list | dict:
