@@ -22,10 +22,11 @@ type ExtItem = Item & {
 export default function ItemDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router  = useRouter();
-  const [item, setItem]     = useState<ExtItem | null>(null);
-  const [dupItem, setDupItem] = useState<ExtItem | null>(null);
-  const [related, setRelated] = useState<Item[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [item, setItem]         = useState<ExtItem | null>(null);
+  const [dupItem, setDupItem]   = useState<ExtItem | null>(null);
+  const [parentCat, setParentCat] = useState<import("@/types/database").Category | null>(null);
+  const [related, setRelated]   = useState<Item[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
@@ -39,6 +40,16 @@ export default function ItemDetailPage() {
       if (data) {
         const ext = data as ExtItem;
         setItem(ext);
+
+        // Load parent category if category has parent_id
+        if (ext.category?.parent_id) {
+          const { data: pc } = await supabase
+            .from("categories")
+            .select("*")
+            .eq("id", ext.category.parent_id)
+            .single();
+          if (pc) setParentCat(pc as import("@/types/database").Category);
+        }
 
         // Load the item it might duplicate
         if (ext.duplicate_of) {
@@ -189,6 +200,13 @@ export default function ItemDetailPage() {
       <Card className="p-6 space-y-4">
         <div className="flex items-start gap-2 flex-wrap">
           <TypeBadge type={item.type} />
+          {/* 分類麵包屑：父分類 › 子分類 */}
+          {parentCat && (
+            <>
+              <CategoryChip name={parentCat.name} color={parentCat.color} icon={parentCat.icon} />
+              <span className="text-[#9898b0] text-xs self-center">›</span>
+            </>
+          )}
           {item.category && (
             <CategoryChip name={item.category.name} color={item.category.color} icon={item.category.icon} />
           )}

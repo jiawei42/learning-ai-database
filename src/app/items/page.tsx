@@ -3,11 +3,12 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import { zhTW } from "date-fns/locale";
-import { Search, Plus, Filter, ExternalLink, Zap, AlertTriangle } from "lucide-react";
+import { Search, Plus, ExternalLink, Zap, AlertTriangle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { Card } from "@/components/ui/Card";
 import { TypeBadge, CategoryChip, QualityDots } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { CategorySelect } from "@/components/ui/Input";
 import type { Item, Category, ItemType } from "@/types/database";
 
 const TYPES: { value: string; label: string }[] = [
@@ -48,10 +49,19 @@ export default function ItemsPage() {
     // Type filter
     if (typeFilter) q = q.eq("type", typeFilter as ItemType);
 
-    // Category filter
-    if (catFilter) q = q.eq("category_id", catFilter);
+    // Category filter — 若選了父分類，自動含子分類
+    if (catFilter) {
+      const childIds = categories
+        .filter((c) => c.parent_id === catFilter)
+        .map((c) => c.id);
+      if (childIds.length > 0) {
+        q = q.in("category_id", [catFilter, ...childIds]);
+      } else {
+        q = q.eq("category_id", catFilter);
+      }
+    }
 
-    // Search — ilike across title + summary + content (supports Chinese + English)
+    // Search — ilike across title + summary + content
     if (query.trim()) {
       const esc = query.trim().replace(/[%_\\]/g, "\\$&");
       q = q.or(`title.ilike.%${esc}%,summary.ilike.%${esc}%,content.ilike.%${esc}%`);
@@ -60,7 +70,7 @@ export default function ItemsPage() {
     const { data } = await q;
     setItems((data as Item[]) ?? []);
     setLoading(false);
-  }, [query, typeFilter, catFilter, tab]);
+  }, [query, typeFilter, catFilter, tab, categories]);
 
   // Dup count badge
   useEffect(() => {
@@ -156,22 +166,13 @@ export default function ItemsPage() {
         </div>
 
         {/* Category */}
-        <div className="flex items-center gap-1.5">
-          <Filter size={13} className="text-[#9898b0]" />
-          <select
-            value={catFilter}
-            onChange={(e) => setCatFilter(e.target.value)}
-            className="bg-[#1e1e2c] border border-white/10 rounded-xl px-3 py-2 text-xs
-                       text-[#e8e8f0] focus:outline-none focus:border-[#6366f1]/60 transition-smooth"
-          >
-            <option value="">所有分類</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.icon} {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <CategorySelect
+          categories={categories}
+          value={catFilter}
+          onChange={(e) => setCatFilter(e.target.value)}
+          placeholder="所有分類"
+          className="text-xs py-2"
+        />
       </div>
 
       {/* Items grid */}

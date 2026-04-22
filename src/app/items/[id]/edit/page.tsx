@@ -5,7 +5,7 @@ import { ArrowLeft } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Input, Textarea, Select } from "@/components/ui/Input";
+import { Input, Textarea, Select, CategorySelect } from "@/components/ui/Input";
 import type { Category, Item, ItemType } from "@/types/database";
 
 export default function EditItemPage() {
@@ -69,10 +69,6 @@ export default function EditItemPage() {
     { value: "repo", label: "⭐ GitHub Repo" },
   ];
 
-  const catOptions = [
-    { value: "", label: "— 不分類 —" },
-    ...categories.map((c) => ({ value: c.id, label: `${c.icon ?? ""} ${c.name}` })),
-  ];
 
   const qualityOptions = [
     { value: "", label: "— 不評分 —" },
@@ -95,7 +91,7 @@ export default function EditItemPage() {
       <Card className="p-6 space-y-5">
         <div className="grid grid-cols-2 gap-4">
           <Select label="類型" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ItemType })} options={typeOptions} />
-          <Select label="分類" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })} options={catOptions} />
+          <CategorySelect label="分類" categories={categories} value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })} />
         </div>
         <Input label="標題 *" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="輸入標題..." />
         <Input label="連結 URL" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://..." type="url" />

@@ -5,7 +5,8 @@
       "Bash(gh repo *)",
       "Bash(npm run *)",
       "Bash(gh workflow *)",
-      "Bash(gh run *)"
+      "Bash(gh run *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

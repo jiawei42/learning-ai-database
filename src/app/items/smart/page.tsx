@@ -5,7 +5,7 @@ import { ArrowLeft, Zap, Link2, FileText, AlertCircle, CheckCircle2 } from "luci
 import { supabase } from "@/lib/supabase";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Input, Textarea, Select } from "@/components/ui/Input";
+import { Input, Textarea, Select, CategorySelect } from "@/components/ui/Input";
 import type { Category } from "@/types/database";
 
 type Step = "input" | "analyzing" | "review" | "saving" | "done";
@@ -120,10 +120,6 @@ export default function SmartAddPage() {
     }
   }
 
-  const catOptions = [
-    { value: "", label: "— 不分類 —" },
-    ...categories.map((c) => ({ value: c.id, label: `${c.icon ?? ""} ${c.name}` })),
-  ];
   const qualityOptions = [
     { value: "5", label: "⭐⭐⭐⭐⭐ 必讀" },
     { value: "4", label: "⭐⭐⭐⭐ 很好" },
@@ -250,14 +246,14 @@ export default function SmartAddPage() {
             />
 
             <div className="grid grid-cols-2 gap-4">
-              <Select
+              <CategorySelect
                 label="分類"
+                categories={categories}
                 value={form.category_id}
                 onChange={(e) => {
                   const cat = categories.find((c) => c.id === e.target.value);
                   setForm({ ...form, category_id: e.target.value, category_slug: cat?.slug ?? "" });
                 }}
-                options={catOptions}
               />
               <Select
                 label="品質評分"

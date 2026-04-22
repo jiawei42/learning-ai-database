@@ -5,7 +5,7 @@ import { ArrowLeft } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Input, Textarea, Select } from "@/components/ui/Input";
+import { Input, Textarea, Select, CategorySelect } from "@/components/ui/Input";
 import type { Category, ItemType } from "@/types/database";
 
 export default function NewItemPage() {
@@ -54,10 +54,6 @@ export default function NewItemPage() {
     { value: "repo", label: "⭐ GitHub Repo" },
   ];
 
-  const catOptions = [
-    { value: "", label: "— 不分類 —" },
-    ...categories.map((c) => ({ value: c.id, label: `${c.icon ?? ""} ${c.name}` })),
-  ];
 
   const qualityOptions = [
     { value: "", label: "— 不評分 —" },
@@ -85,11 +81,11 @@ export default function NewItemPage() {
             onChange={(e) => setForm({ ...form, type: e.target.value as ItemType })}
             options={typeOptions}
           />
-          <Select
+          <CategorySelect
             label="分類"
+            categories={categories}
             value={form.category_id}
             onChange={(e) => setForm({ ...form, category_id: e.target.value })}
-            options={catOptions}
           />
         </div>
 
