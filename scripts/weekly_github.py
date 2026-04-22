@@ -320,7 +320,7 @@ def build_content(analysis: dict) -> str:
 
 # ── 主流程 ─────────────────────────────────────────────────────────────────────
 def main() -> None:
-    print(f"[{datetime.now().date()}] 開始分析 GitHub AI Trending（Claude {CLAUDE_MODEL}）...")
+    print(f"[{datetime.now().date()}] 開始分析 GitHub AI Trending（Claude fallback: {' → '.join(CLAUDE_MODELS)}）...")
 
     open_source_cat_id = get_category_id("open-source")
     if not open_source_cat_id:
