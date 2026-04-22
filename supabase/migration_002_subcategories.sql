@@ -10,7 +10,7 @@ select
   (select id from categories where slug = sub.parent_slug),
   sub.color,
   sub.icon,
-  sub.desc
+  sub.descr
 from (values
   -- ── AI 模型 子分類 ────────────────────────────────────────
   ('前沿閉源模型',    'llm-frontier',   'ai-models',       '#6366f1', '🤖', 'GPT-4o、Claude、Gemini 等最新版本'),
@@ -39,6 +39,6 @@ from (values
   ('教學 / 課程',     'course',         'learning',        '#8b5cf6', '🎓', 'Coursera、YouTube 教學'),
   ('實作 / 範例',     'tutorial',       'learning',        '#a78bfa', '🔨', 'Notebook、Code 範例、Hands-on')
 
-) as sub(name, slug, parent_slug, color, icon, desc)
+) as sub(name, slug, parent_slug, color, icon, descr)
 where (select id from categories where slug = sub.parent_slug) is not null
-on conflict (slug) do nothing;
+on conflict (slug) do update set description = excluded.description;
