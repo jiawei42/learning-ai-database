@@ -1,0 +1,29 @@
+name: Daily AI News
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 每天 08:00 CST (UTC+8 = UTC 00:00)
+  workflow_dispatch:        # 手動觸發
+
+jobs:
+  fetch-news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Fetch and summarize AI news
+        env:
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scripts/daily_news.py

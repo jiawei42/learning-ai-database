@@ -1,0 +1,30 @@
+name: Weekly GitHub Trending Analysis
+
+on:
+  schedule:
+    - cron: "0 1 * * 1"   # 每週一 09:00 CST (UTC 01:00)
+  workflow_dispatch:
+
+jobs:
+  analyze-repos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Analyze GitHub AI trending repos
+        env:
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/weekly_github.py
