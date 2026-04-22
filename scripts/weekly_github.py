@@ -1,16 +1,12 @@
 """
 weekly_github.py v2 — 每週抓 GitHub AI trending repos
-用 Claude 3.5 Haiku 深度分析（code 理解能力強），存入 Supabase。
+用 Gemini 免費模型深度分析，存入 Supabase。
 
-改進：
-  - Claude 3.5 Haiku（claude-3-5-haiku-20241022）：技術 / code 理解最佳選擇
-  - 抓 README（最多 6000 字）+ 最新 Release notes（最近 3 條）
-  - 嚴格 JSON 輸出契約 + 逐欄驗證
-  - Claude / GitHub API 錯誤均有 retry + exponential backoff
-  - 重複跳過（URL 精確 + 標題相似度）
+Gemini Fallback chain（全免費）：
+  gemini-2.5-flash → gemini-2.0-flash → gemini-1.5-flash
 
-環境變數：ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
-可選：GITHUB_TOKEN（提高 API rate limit）
+環境變數：GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
+可選：GITHUB_TOKEN（提高 GitHub API rate limit）
 """
 
 import json
@@ -23,18 +19,19 @@ from urllib.parse import quote
 import httpx
 
 # ── 環境變數 ──────────────────────────────────────────────────────────────────
-ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
-SUPABASE_URL  = os.environ["SUPABASE_URL"]
-SUPABASE_KEY  = os.environ["SUPABASE_SERVICE_KEY"]
-GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
+GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
-# Fallback chain：從最新最強開始試，400 Invalid Model 就換下一個
-CLAUDE_MODELS = [
-    "claude-haiku-4-5",            # Claude 4.5 Haiku（最新，若可用優先）
-    "claude-3-5-sonnet-20241022",  # Claude 3.5 Sonnet（品質更好的 fallback）
-    "claude-3-5-haiku-20241022",   # Claude 3.5 Haiku（保底，確定可用）
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Fallback chain：全免費，從最新最強開始試
+GEMINI_MODELS = [
+    "gemini-2.5-flash",   # 最新最強（免費額度）
+    "gemini-2.0-flash",   # 穩定備用
+    "gemini-1.5-flash",   # 保底，最穩定
 ]
-CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 
 MAX_REPOS     = 10     # 每週最多儲存幾個
 DUP_THRESHOLD = 0.65
@@ -220,72 +217,59 @@ def build_prompt(repo: dict, readme: str, releases: str) -> str:
 
 # 可 retry 的暫時性錯誤（過載/限流）
 _RETRYABLE = {429, 503, 529}
-# model 不存在 → 直接換下一個，不重試
-_INVALID_MODEL = {400, 404}
 
 
-def claude_analyze(repo: dict, readme: str, releases: str) -> dict:
+def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
     """
-    Fallback chain：依序試 CLAUDE_MODELS。
+    Gemini Fallback chain：依序試 GEMINI_MODELS（全免費）。
     - 429/503/529（過載）→ 同 model retry（最多 3 次，5/15/40s backoff）
-    - 400（model 不存在的特定訊息）→ 換下一個
-    - 其他 400（request 格式錯誤）→ 直接 raise，不換 model
+    - 404（model 不存在）→ 換下一個
+    - 其他非 2xx → 印出 body，直接 raise
     """
     prompt = build_prompt(repo, readme, releases)
     last_error = "（未嘗試）"
 
-    for model in CLAUDE_MODELS:
+    for model in GEMINI_MODELS:
         print(f"    嘗試模型：{model}")
+        url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
         retry_delays = [5, 15, 40]
 
         for attempt in range(3):
             resp = httpx.post(
-                CLAUDE_URL,
-                headers={
-                    "x-api-key":         ANTHROPIC_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type":      "application/json",
-                },
+                url,
+                headers={"Content-Type": "application/json"},
                 json={
-                    "model":      model,
-                    "max_tokens": 1200,
-                    "messages":   [{"role": "user", "content": prompt}],
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 1400, "temperature": 0.2},
                 },
                 timeout=90,
             )
 
-            # 暫時過載 → 同 model retry
+            # 過載 → 同 model retry
             if resp.status_code in _RETRYABLE:
                 if attempt < 2:
                     wait = retry_delays[attempt]
-                    print(f"    Claude {resp.status_code}，等待 {wait}s 後重試...")
+                    print(f"    Gemini {resp.status_code}，等待 {wait}s 後重試...")
                     time.sleep(wait)
                     continue
                 else:
                     last_error = f"{model} 過載超過重試次數"
-                    break  # 換下一個 model
-
-            # 非 2xx → 印出 body，判斷是否換 model
-            if not resp.is_success:
-                body = resp.text[:400]
-                print(f"    Claude {resp.status_code}: {body}")
-
-                # 只有明確 "model not found/supported" 才換下一個
-                if resp.status_code in {400, 404} and any(
-                    kw in body.lower()
-                    for kw in ("model", "not found", "not support", "invalid model", "unknown model")
-                ):
-                    last_error = f"{model} → {resp.status_code} model not found"
-                    print(f"    ✗ Model 不存在，換下一個")
                     break
 
-                # 其他 400（API key 錯、格式錯、content policy）→ 直接 raise
-                raise RuntimeError(
-                    f"Claude {resp.status_code} ({model}): {body}"
-                )
+            # 404 → model 不存在，換下一個
+            if resp.status_code == 404:
+                last_error = f"{model} → 404 not found"
+                print(f"    ✗ Model 不存在，換下一個")
+                break
+
+            # 其他非 2xx → 印出 body，raise
+            if not resp.is_success:
+                body = resp.text[:400]
+                print(f"    Gemini {resp.status_code}: {body}")
+                raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
 
             # ✅ 成功
-            raw = resp.json()["content"][0]["text"].strip()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"^```\s*", "", raw)
             raw = re.sub(r"```\s*$", "", raw).strip()
@@ -294,7 +278,7 @@ def claude_analyze(repo: dict, readme: str, releases: str) -> dict:
             print(f"    ✓ 使用模型：{model}")
             return result
 
-    raise RuntimeError(f"所有 Claude 模型均失敗，最後錯誤：{last_error}")
+    raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
 
 
 def validate_analysis(out: dict) -> str | None:
@@ -323,7 +307,7 @@ def build_content(analysis: dict) -> str:
 
 # ── 主流程 ─────────────────────────────────────────────────────────────────────
 def main() -> None:
-    print(f"[{datetime.now().date()}] 開始分析 GitHub AI Trending（Claude fallback: {' → '.join(CLAUDE_MODELS)}）...")
+    print(f"[{datetime.now().date()}] 開始分析 GitHub AI Trending（Gemini fallback: {' → '.join(GEMINI_MODELS)}）...")
 
     open_source_cat_id = get_category_id("open-source")
     if not open_source_cat_id:
@@ -371,7 +355,7 @@ def main() -> None:
 
         # Claude 分析
         try:
-            analysis = claude_analyze(repo, readme, releases)
+            analysis = gemini_analyze(repo, readme, releases)
         except Exception as e:
             print(f"    ✗ 分析失敗: {e}")
             continue
@@ -405,7 +389,7 @@ def main() -> None:
                 "tags":         [t.lower() for t in repo["topics"][:4]],
                 "fetched_at":   datetime.now(timezone.utc).isoformat(),
                 "ai_processed": True,
-                "model":        analysis.get("_model_used", CLAUDE_MODELS[-1]),
+                "model":        analysis.get("_model_used", GEMINI_MODELS[-1]),
             },
         }
 
