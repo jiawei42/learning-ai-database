@@ -33,7 +33,7 @@ GEMINI_MODELS = [
     "gemini-1.5-flash",   # 保底，最穩定
 ]
 
-MAX_REPOS     = 10     # 每週最多儲存幾個
+MAX_REPOS     = 6      # 每週最多儲存幾個（免費 API quota 考量）
 DUP_THRESHOLD = 0.65
 
 SEARCH_QUERIES = [
@@ -43,6 +43,21 @@ SEARCH_QUERIES = [
     "AI inference serving deployment",
     "machine learning training tools",
 ]
+
+
+# ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
+_gemini_last_call: float = 0.0
+_GEMINI_MIN_INTERVAL = 7.0  # 秒（10 RPM = 6s/call，留 1s buffer）
+
+
+def _gemini_wait() -> None:
+    """每次 Gemini call 前呼叫，確保不超過 RPM 限制。"""
+    global _gemini_last_call
+    elapsed = time.time() - _gemini_last_call
+    if elapsed < _GEMINI_MIN_INTERVAL:
+        wait = _GEMINI_MIN_INTERVAL - elapsed
+        time.sleep(wait)
+    _gemini_last_call = time.time()
 
 
 # ── Supabase ───────────────────────────────────────────────────────────────────
@@ -257,7 +272,7 @@ _RETRYABLE = {429, 503, 529}
 def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
     """
     Gemini Fallback chain：依序試 GEMINI_MODELS（全免費）。
-    - 429/503/529（過載）→ 同 model retry（最多 3 次，5/15/40s backoff）
+    - 429/503/529（過載）→ 同 model retry（最多 3 次，60/120/240s backoff）
     - 404（model 不存在）→ 換下一個
     - 其他非 2xx → 印出 body，直接 raise
     """
@@ -267,9 +282,10 @@ def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
     for model in GEMINI_MODELS:
         print(f"    嘗試模型：{model}")
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
-        retry_delays = [5, 15, 40]
+        retry_delays = [60, 120, 240]  # 429 需要等夠久
 
         for attempt in range(3):
+            _gemini_wait()  # ← 全域 rate limit：確保每次至少間隔 7s
             resp = httpx.post(
                 url,
                 headers={"Content-Type": "application/json"},
@@ -449,7 +465,7 @@ def main() -> None:
         except Exception as e:
             print(f"    ✗ 插入失敗: {e}")
 
-        time.sleep(2)  # Claude rate limit 緩衝
+        # rate limit 由 _gemini_wait() 統一處理，此處不額外 sleep
 
     print(f"\n完成！分析並儲存 {inserted} 個 repos")
 

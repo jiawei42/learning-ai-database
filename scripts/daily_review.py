@@ -19,6 +19,18 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 SAMPLE_SIZE = 8
 
+# ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
+_gemini_last_call: float = 0.0
+_GEMINI_MIN_INTERVAL = 7.0
+
+
+def _gemini_wait() -> None:
+    global _gemini_last_call
+    elapsed = time.time() - _gemini_last_call
+    if elapsed < _GEMINI_MIN_INTERVAL:
+        time.sleep(_GEMINI_MIN_INTERVAL - elapsed)
+    _gemini_last_call = time.time()
+
 
 def supabase_req(method, path, body=None):
     headers = {
@@ -71,11 +83,12 @@ def gemini(prompt: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 800, "temperature": 0.3},
     }
-    retry_delays = [10, 30, 60]
+    retry_delays = [60, 120, 240]
     last_error = "（未嘗試）"
     for model in GEMINI_MODELS:
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
         for attempt in range(3):
+            _gemini_wait()
             resp = httpx.post(url, json=payload, timeout=60)
             if resp.status_code in {429, 503, 529}:
                 if attempt < 2:

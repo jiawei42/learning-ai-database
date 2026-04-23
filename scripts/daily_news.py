@@ -172,6 +172,20 @@ def check_duplicate(url: str, title: str) -> tuple[bool, bool, str | None]:
     return False, False, None
 
 
+# ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
+_gemini_last_call: float = 0.0
+_GEMINI_MIN_INTERVAL = 7.0  # 秒（10 RPM = 6s/call，留 1s buffer）
+
+
+def _gemini_wait() -> None:
+    """每次 Gemini call 前呼叫，確保不超過 RPM 限制。"""
+    global _gemini_last_call
+    elapsed = time.time() - _gemini_last_call
+    if elapsed < _GEMINI_MIN_INTERVAL:
+        time.sleep(_GEMINI_MIN_INTERVAL - elapsed)
+    _gemini_last_call = time.time()
+
+
 # ── Gemini 呼叫（三模型 fallback，全免費）────────────────────────────────────
 def _extract_text(resp_json: dict) -> str:
     """安全地從 Gemini response 取出文字，避免 KeyError。"""
@@ -241,7 +255,7 @@ def call_gemini(
     if use_search:
         payload["tools"] = [{"google_search": {}}]
 
-    retry_delays = [10, 30, 60]
+    retry_delays = [60, 120, 240]  # 429 需要等夠久，短 backoff 沒用
     last_error = "（未嘗試）"
 
     for model in GEMINI_MODELS:
@@ -252,6 +266,7 @@ def call_gemini(
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
 
         for attempt in range(3):
+            _gemini_wait()  # ← 全域 rate limit：確保每次至少間隔 7s
             resp = httpx.post(url, json=payload, timeout=120)
 
             # 過載 / 限流 → 重試
@@ -595,7 +610,7 @@ def main() -> None:
         except Exception as e:
             print(f"    ✗ 插入失敗: {e}")
 
-        time.sleep(1)  # 避免 Gemini rate limit
+        # rate limit 由 _gemini_wait() 統一處理
 
     print(f"\n完成！插入 {inserted} 篇（含 Priority 來源）")
 
