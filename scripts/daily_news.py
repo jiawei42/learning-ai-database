@@ -381,7 +381,7 @@ def scan_priority_source(source: dict, today: str) -> list[dict]:
                 today=today,
                 source_name=source["name"],
                 url=source["url"],
-                content=content,
+                content=content.replace("{", "{{").replace("}", "}}"),
                 base_url=source["base_url"],
             ),
             max_tokens=800,
@@ -443,10 +443,10 @@ def analyze_article(article: dict) -> dict | None:
     try:
         raw = call_gemini(
             _ANALYZE_PROMPT.format(
-                title=title,
+                title=title.replace("{", "{{").replace("}", "}}"),
                 url=url,
                 source=source,
-                content=content,
+                content=content.replace("{", "{{").replace("}", "}}"),
             ),
             max_tokens=1200,
         )

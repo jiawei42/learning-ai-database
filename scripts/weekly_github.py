@@ -13,7 +13,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -137,7 +137,7 @@ def github_search(query: str, limit: int = 10) -> list[dict]:
         resp = httpx.get(
             "https://api.github.com/search/repositories",
             params={
-                "q":        f"{query} pushed:>2025-01-01",
+                "q":        f"{query} pushed:>{(datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')}",
                 "sort":     "stars",
                 "order":    "desc",
                 "per_page": limit,
@@ -303,12 +303,25 @@ def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
                 print(f"    Gemini {resp.status_code}: {body}")
                 raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
 
-            # ✅ 成功
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # ✅ 成功 — 取出文字
+            try:
+                raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except (KeyError, IndexError, TypeError) as e:
+                last_error = f"{model} response 結構異常: {e}"
+                print(f"    ✗ Response 結構異常，換下一個 model: {e}")
+                break  # 換下一個 model
+
             raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"^```\s*", "", raw)
             raw = re.sub(r"```\s*$", "", raw).strip()
-            result = _safe_json_loads(raw)
+
+            try:
+                result = _safe_json_loads(raw)
+            except (ValueError, Exception) as e:
+                last_error = f"{model} JSON 解析失敗: {e}"
+                print(f"    ✗ JSON 解析失敗，換下一個 model")
+                break  # 換下一個 model
+
             result["_model_used"] = model
             print(f"    ✓ 使用模型：{model}")
             return result
