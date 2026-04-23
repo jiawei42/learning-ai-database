@@ -88,6 +88,41 @@ def check_duplicate(url: str, title: str) -> tuple[bool, bool, str | None]:
     return False, False, None
 
 
+# ── JSON 容錯解析 ──────────────────────────────────────────────────────────────
+def _safe_json_loads(raw: str) -> dict:
+    """解析 JSON，自動修復字串內未跳脫的換行／Tab（Gemini markdown 欄位常見問題）。"""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Character-by-character fix
+    out: list[str] = []
+    in_str = False
+    esc = False
+    for ch in raw:
+        if esc:
+            out.append(ch)
+            esc = False
+        elif ch == "\\" and in_str:
+            out.append(ch)
+            esc = True
+        elif ch == '"':
+            out.append(ch)
+            in_str = not in_str
+        elif in_str and ch == "\n":
+            out.append("\\n")
+        elif in_str and ch == "\r":
+            out.append("\\r")
+        elif in_str and ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+    try:
+        return json.loads("".join(out))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON 解析失敗（修復後仍無效）: {e}\n原始: {raw[:300]}")
+
+
 # ── GitHub API ─────────────────────────────────────────────────────────────────
 def _gh_headers() -> dict:
     h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
@@ -273,7 +308,7 @@ def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
             raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"^```\s*", "", raw)
             raw = re.sub(r"```\s*$", "", raw).strip()
-            result = json.loads(raw)
+            result = _safe_json_loads(raw)
             result["_model_used"] = model
             print(f"    ✓ 使用模型：{model}")
             return result

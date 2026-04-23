@@ -175,10 +175,52 @@ def check_duplicate(url: str, title: str) -> tuple[bool, bool, str | None]:
 # ── Gemini 呼叫（三模型 fallback，全免費）────────────────────────────────────
 def _extract_text(resp_json: dict) -> str:
     """安全地從 Gemini response 取出文字，避免 KeyError。"""
+    candidates = resp_json.get("candidates", [])
+    if not candidates:
+        raise ValueError(f"Gemini response 無 candidates | {str(resp_json)[:200]}")
+    candidate = candidates[0]
+    finish_reason = candidate.get("finishReason", "")
+    content = candidate.get("content", {})
+    parts = content.get("parts", [])
+    if not parts:
+        raise ValueError(
+            f"Gemini response 無 parts (finishReason={finish_reason}) | {str(resp_json)[:200]}"
+        )
+    return parts[0].get("text", "").strip()
+
+
+def _safe_json_loads(raw: str) -> list | dict:
+    """解析 JSON，自動修復字串內未跳脫的換行／Tab 字元（Gemini markdown 常見問題）。"""
     try:
-        return resp_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError, TypeError) as e:
-        raise ValueError(f"Gemini response 結構異常: {e} | {str(resp_json)[:200]}")
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Character-by-character fix for unescaped control chars inside strings
+    out: list[str] = []
+    in_str = False
+    esc = False
+    for ch in raw:
+        if esc:
+            out.append(ch)
+            esc = False
+        elif ch == "\\" and in_str:
+            out.append(ch)
+            esc = True
+        elif ch == '"':
+            out.append(ch)
+            in_str = not in_str
+        elif in_str and ch == "\n":
+            out.append("\\n")
+        elif in_str and ch == "\r":
+            out.append("\\r")
+        elif in_str and ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+    try:
+        return json.loads("".join(out))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON 解析失敗（修復後仍無效）: {e}\n原始: {raw[:300]}")
 
 
 def call_gemini(
@@ -233,14 +275,19 @@ def call_gemini(
                 body = resp.text[:300]
                 raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
 
-            # ✅ 成功
-            return _extract_text(resp.json())
+            # ✅ 成功（嘗試取出文字，結構異常時換下一個 model）
+            try:
+                return _extract_text(resp.json())
+            except ValueError as ve:
+                last_error = str(ve)
+                print(f"  ⚠ {model} 回應結構異常，換下一個 model")
+                break  # 換下一個 model
 
     raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
 
 
 def parse_json_from_text(raw: str) -> list | dict:
-    """從 Gemini 回應萃取 JSON（容錯解析）。"""
+    """從 Gemini 回應萃取 JSON（容錯解析 + 自動修復換行）。"""
     raw = raw.strip()
     # 移除 markdown code fence
     raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
@@ -251,7 +298,7 @@ def parse_json_from_text(raw: str) -> list | dict:
         m = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", raw)
         if m:
             raw = m.group(1)
-    return json.loads(raw)
+    return _safe_json_loads(raw)
 
 
 # ── Phase 1：Gemini + Google Search 搜尋今日一般新聞 ──────────────────────────
