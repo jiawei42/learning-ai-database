@@ -44,7 +44,7 @@ export function StatCard({
     <Card className={clsx("p-5 overflow-hidden", accentClass ?? "stat-accent-indigo")}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-[#9898b0] uppercase tracking-wider">{label}</p>
+          <p className="text-xs font-medium text-[#9898b0] truncate">{label}</p>
           <p className="text-2xl font-bold mt-1.5 text-[#eeeef8] tabular-nums">{value}</p>
         </div>
         <div

@@ -67,6 +67,29 @@ html.light body {
   color: #1a1a2e;
 }
 
+/* ── Light mode: override hardcoded dark-palette Tailwind classes ── */
+/* Primary text (#eeeef8 → dark navy) */
+html.light .text-\[\#eeeef8\]  { color: #1a1a2e !important; }
+html.light .text-\[\#e8e8f0\]  { color: #1a1a2e !important; }
+/* Secondary text (#9898b0 → medium slate) */
+html.light .text-\[\#9898b0\]  { color: #52526e !important; }
+/* Borders / dividers */
+html.light .border-white\/6   { border-color: rgba(0,0,0,0.07) !important; }
+html.light .border-white\/10  { border-color: rgba(0,0,0,0.10) !important; }
+html.light .border-white\/\[0\.07\] { border-color: rgba(0,0,0,0.07) !important; }
+/* Backgrounds */
+html.light .bg-white\/5  { background: rgba(0,0,0,0.03) !important; }
+html.light .bg-white\/6  { background: rgba(0,0,0,0.04) !important; }
+html.light .bg-white\/8  { background: rgba(0,0,0,0.05) !important; }
+html.light .bg-\[\#0c0c16\]  { background: #ffffff !important; }
+html.light .bg-\[\#0f0f18\]  { background: #ffffff !important; }
+html.light .bg-\[\#1a1a28\]  { background: #f0f0f6 !important; }
+html.light .bg-\[\#13131e\]  { background: #f8f8fc !important; }
+/* Graph canvas in light mode already handled by .graph-canvas */
+/* data-row hover in light mode already handled */
+/* Mobile topbar */
+html.light .bg-\[\#0c0c16\]\/95 { background: rgba(255,255,255,0.95) !important; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
