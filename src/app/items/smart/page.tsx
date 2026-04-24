@@ -129,7 +129,7 @@ export default function SmartAddPage() {
   ];
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-2xl space-y-6 animate-fade-in">
       {/* Header */}
       <div className="flex items-center gap-3">
         <button

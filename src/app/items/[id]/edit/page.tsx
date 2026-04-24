@@ -80,7 +80,7 @@ export default function EditItemPage() {
   ];
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-2xl space-y-6 animate-fade-in">
       <div className="flex items-center gap-3">
         <button onClick={() => router.back()} className="p-2 rounded-lg hover:bg-white/8 text-[#9898b0] hover:text-[#e8e8f0] transition-smooth">
           <ArrowLeft size={18} />

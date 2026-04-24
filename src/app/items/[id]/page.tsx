@@ -135,7 +135,7 @@ export default function ItemDetailPage() {
   const tags = Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [];
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-2xl space-y-6 animate-fade-in">
       {/* Toolbar */}
       <div className="flex items-center gap-3">
         <button

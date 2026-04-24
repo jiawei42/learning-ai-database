@@ -25,7 +25,7 @@ export default function ReviewsPage() {
   }, []);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-2xl font-semibold text-[#e8e8f0]">審查紀錄</h1>
         <p className="text-sm text-[#9898b0] mt-1">AI 每日自動抽查一類內容的品質報告</p>
