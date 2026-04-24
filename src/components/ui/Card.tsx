@@ -13,7 +13,11 @@ export function Card({ children, className, hover, onClick }: CardProps) {
       onClick={onClick}
       className={clsx(
         "glass transition-smooth",
-        hover && "cursor-pointer hover:bg-white/[0.07] hover:border-white/15 hover:-translate-y-0.5",
+        hover && [
+          "cursor-pointer",
+          "hover:bg-white/[0.07] hover:border-white/[0.13]",
+          "hover:-translate-y-0.5 hover:shadow-[0_8px_32px_rgba(0,0,0,0.25)]",
+        ],
         onClick && "cursor-pointer",
         className
       )}
@@ -28,22 +32,24 @@ export function StatCard({
   value,
   icon,
   color = "#6366f1",
+  accentClass,
 }: {
   label: string;
   value: string | number;
   icon: React.ReactNode;
   color?: string;
+  accentClass?: string;
 }) {
   return (
-    <Card className="p-5">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-sm text-[#9898b0]">{label}</p>
-          <p className="text-2xl font-semibold mt-1 text-[#e8e8f0]">{value}</p>
+    <Card className={clsx("p-5 overflow-hidden", accentClass ?? "stat-accent-indigo")}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-[#9898b0] uppercase tracking-wider">{label}</p>
+          <p className="text-2xl font-bold mt-1.5 text-[#eeeef8] tabular-nums">{value}</p>
         </div>
         <div
-          className="p-2.5 rounded-xl"
-          style={{ background: color + "22", color }}
+          className="p-2.5 rounded-xl flex-shrink-0"
+          style={{ background: color + "20", color }}
         >
           {icon}
         </div>
