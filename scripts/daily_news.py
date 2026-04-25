@@ -35,7 +35,8 @@ GEMINI_MODELS = [
     "gemini-1.5-flash",
 ]
 
-MAX_NEWS      = 10    # 一般新聞上限（Priority 不計）
+MAX_NEWS      = 6     # 一般新聞上限（Priority 不計）；降低以節省 Gemini 配額
+BATCH_SIZE    = 3     # 每次 Gemini 呼叫分析的文章數
 DUP_THRESHOLD = 0.65  # 標題相似度閾值
 
 VALID_CATEGORIES = {
@@ -174,7 +175,7 @@ def check_duplicate(url: str, title: str) -> tuple[bool, bool, str | None]:
 
 # ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
 _gemini_last_call: float = 0.0
-_GEMINI_MIN_INTERVAL = 7.0  # 秒（10 RPM = 6s/call，留 1s buffer）
+_GEMINI_MIN_INTERVAL = 12.0  # 秒（5 RPM，安全緩衝空間 5 RPM）
 
 
 def _gemini_wait() -> None:
@@ -255,7 +256,6 @@ def call_gemini(
     if use_search:
         payload["tools"] = [{"google_search": {}}]
 
-    retry_delays = [60, 120, 240]  # 429 需要等夠久，短 backoff 沒用
     last_error = "（未嘗試）"
 
     for model in GEMINI_MODELS:
@@ -264,39 +264,34 @@ def call_gemini(
             continue
 
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
+        _gemini_wait()
+        resp = httpx.post(url, json=payload, timeout=120)
 
-        for attempt in range(3):
-            _gemini_wait()  # ← 全域 rate limit：確保每次至少間隔 7s
-            resp = httpx.post(url, json=payload, timeout=120)
+        # 限流／過載 → 直接換下一個 model（不重試同 model，各 model 配額獨立）
+        if resp.status_code in {429, 503, 529}:
+            last_error = f"{model} 限流 ({resp.status_code})"
+            print(f"  ⚠ {model} {resp.status_code}，換下一個 model")
+            time.sleep(3)
+            continue
 
-            # 過載 / 限流 → 重試
-            if resp.status_code in {429, 503}:
-                if attempt < 2:
-                    wait = retry_delays[attempt]
-                    print(f"  Gemini {model} {resp.status_code}，等待 {wait}s...")
-                    time.sleep(wait)
-                    continue
-                last_error = f"{model} 過載超過重試次數"
-                break
+        # model 不存在 → 換下一個
+        if resp.status_code == 404:
+            last_error = f"{model} 404 not found"
+            print(f"  ⚠ {model} 不存在，換下一個 model")
+            continue
 
-            # model 不存在 → 換下一個
-            if resp.status_code == 404:
-                last_error = f"{model} 404 not found"
-                print(f"  Gemini {model} 不存在，換下一個")
-                break
+        # 其他非 2xx
+        if not resp.is_success:
+            body = resp.text[:300]
+            raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
 
-            # 其他非 2xx
-            if not resp.is_success:
-                body = resp.text[:300]
-                raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
-
-            # ✅ 成功（嘗試取出文字，結構異常時換下一個 model）
-            try:
-                return _extract_text(resp.json())
-            except ValueError as ve:
-                last_error = str(ve)
-                print(f"  ⚠ {model} 回應結構異常，換下一個 model")
-                break  # 換下一個 model
+        # ✅ 成功
+        try:
+            return _extract_text(resp.json())
+        except ValueError as ve:
+            last_error = str(ve)
+            print(f"  ⚠ {model} 回應結構異常，換下一個 model")
+            continue
 
     raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
 
@@ -473,6 +468,56 @@ def analyze_article(article: dict) -> dict | None:
     return None
 
 
+def analyze_articles_batch(articles: list[dict]) -> list[dict | None]:
+    """Fetch 並批次分析多篇文章（最多 BATCH_SIZE 篇），回傳與輸入等長的結果 list。"""
+    n = len(articles)
+
+    sections: list[str] = []
+    for i, article in enumerate(articles):
+        url    = article.get("url", "")
+        title  = article.get("title", "")
+        source = article.get("source", urlparse(url).netloc if url else "")
+        content, ok = fetch_text(url, max_chars=2200)
+        if not ok or len(content) < 80:
+            content = "（無法取得完整頁面內容，請根據標題與來源推測分析）"
+        sections.append(
+            "文章 " + str(i + 1) + "：" + title + "\n"
+            + "來源：" + source + "\n"
+            + "內容：" + content
+        )
+
+    prompt = (
+        "你是 AI 知識管理員，請分析以下 " + str(n) + " 篇文章，"
+        "各自生成一張繁體中文知識卡片。\n\n"
+        "嚴格輸出 JSON array，長度必須 = " + str(n) + "（順序對應文章編號）：\n"
+        '[\n'
+        '  {\n'
+        '    "title":      "保留原文標題；若非中文可補副標：原標題 — 繁中副標",\n'
+        '    "summary_zh": "繁體中文摘要 40-100 字，純文字",\n'
+        '    "content_zh": "繁體中文重點筆記，Markdown 格式，100-350 字",\n'
+        '    "category":   "ai-models|tools-frameworks|research|industry|open-source|learning|notes",\n'
+        '    "quality":    1,\n'
+        '    "tags":       ["tag1","tag2","tag3"]\n'
+        '  }\n'
+        ']\n\n'
+        "--- 文章列表 ---\n"
+        + "\n\n".join(sections)
+        + "\n--- END ---\n\n"
+        "只回傳 JSON array，不要 markdown code fence，不要其他文字。"
+    )
+
+    try:
+        raw = call_gemini(prompt, max_tokens=2800)
+        results = parse_json_from_text(raw)
+        if isinstance(results, list) and len(results) == n:
+            return [r if isinstance(r, dict) else None for r in results]
+        got = len(results) if isinstance(results, list) else type(results).__name__
+        print(f"  ⚠ 批次分析回傳數量不符 (期待 {n}，得到 {got})")
+    except Exception as e:
+        print(f"  ✗ 批次分析失敗: {e}")
+    return [None] * n
+
+
 def validate_analysis(out: dict) -> str | None:
     """回傳錯誤訊息，None 代表合法。"""
     if not isinstance(out.get("title"), str) or not out["title"]:
@@ -549,68 +594,64 @@ def main() -> None:
         print("  沒有新文章，結束。")
         return
 
-    # ── Step 3：深度分析 + 存入 DB ───────────────────────────────────────────
+    # ── Step 3：批次深度分析 + 存入 DB ──────────────────────────────────────
     inserted = 0
-    for article in final_list:
-        url    = article.get("url", "")
-        title  = article.get("title", "")
-        source = article.get("source", urlparse(url).netloc if url else "Daily AI News")
+    for batch_start in range(0, len(final_list), BATCH_SIZE):
+        batch = final_list[batch_start:batch_start + BATCH_SIZE]
+        print(f"\n  ▶ 批次分析 {len(batch)} 篇 "
+              f"[{', '.join(a.get('title','')[:25] for a in batch)}]")
 
-        print(f"\n  ▶ {title[:65]}...")
+        analyses = analyze_articles_batch(batch)
 
-        # 深度分析
-        analysis = analyze_article(article)
-        if not analysis:
-            print("    ✗ 跳過（分析失敗）")
-            continue
+        for article, analysis in zip(batch, analyses):
+            url    = article.get("url", "")
+            title  = article.get("title", "")
+            source = article.get("source", urlparse(url).netloc if url else "Daily AI News")
 
-        err = validate_analysis(analysis)
-        if err:
-            print(f"    ✗ 跳過（{err}）")
-            continue
+            if not analysis:
+                print(f"    ✗ 跳過（分析失敗）: {title[:50]}")
+                continue
 
-        # 標題相似度重複檢查
-        _, is_suspect, dup_of = check_duplicate(url, analysis["title"])
+            err = validate_analysis(analysis)
+            if err:
+                print(f"    ✗ 跳過（{err}）: {title[:50]}")
+                continue
 
-        # 分類 ID
-        cat_slug = analysis.get("category", "")
-        cat_id   = cat_ids.get(cat_slug)
-        if not cat_id:
-            print(f"    ⚠ category '{cat_slug}' 找不到對應 ID，category_id 將為 null")
+            _, is_suspect, dup_of = check_duplicate(url, analysis["title"])
 
-        item = {
-            "type":             "news",
-            "title":            analysis["title"],
-            "url":              url or None,
-            "summary":          analysis["summary_zh"],
-            "content":          analysis.get("content_zh") or None,
-            "category_id":      cat_id,
-            "source":           source,
-            "quality":          analysis["quality"],
-            "is_pinned":        False,
-            "duplicate_suspect": is_suspect,
-            "duplicate_of":     dup_of,
-            "metadata": {
-                "tags":         analysis.get("tags", []),
-                "fetched_at":   datetime.now(timezone.utc).isoformat(),
-                "ai_processed": True,
-                "is_priority":  article.get("is_priority", False),
-            },
-        }
+            cat_slug = analysis.get("category", "")
+            cat_id   = cat_ids.get(cat_slug)
+            if not cat_id:
+                print(f"    ⚠ category '{cat_slug}' 找不到對應 ID，category_id 將為 null")
 
-        try:
-            supabase_req("POST", "/items", item)
-            inserted += 1
-            priority_flag = " [⭐Priority]" if article.get("is_priority") else ""
-            dup_flag      = " ⚠ [重複嫌疑]" if is_suspect else ""
-            print(
-                f"    ✓ Q{analysis['quality']} "
-                f"[{cat_slug}]{priority_flag}{dup_flag}"
-            )
-        except Exception as e:
-            print(f"    ✗ 插入失敗: {e}")
+            item = {
+                "type":              "news",
+                "title":             analysis["title"],
+                "url":               url or None,
+                "summary":           analysis["summary_zh"],
+                "content":           analysis.get("content_zh") or None,
+                "category_id":       cat_id,
+                "source":            source,
+                "quality":           analysis["quality"],
+                "is_pinned":         False,
+                "duplicate_suspect": is_suspect,
+                "duplicate_of":      dup_of,
+                "metadata": {
+                    "tags":          analysis.get("tags", []),
+                    "fetched_at":    datetime.now(timezone.utc).isoformat(),
+                    "ai_processed":  True,
+                    "is_priority":   article.get("is_priority", False),
+                },
+            }
 
-        # rate limit 由 _gemini_wait() 統一處理
+            try:
+                supabase_req("POST", "/items", item)
+                inserted += 1
+                priority_flag = " [⭐Priority]" if article.get("is_priority") else ""
+                dup_flag      = " ⚠ [重複嫌疑]" if is_suspect else ""
+                print(f"    ✓ {title[:40]} Q{analysis['quality']} [{cat_slug}]{priority_flag}{dup_flag}")
+            except Exception as e:
+                print(f"    ✗ 插入失敗: {e}")
 
     print(f"\n完成！插入 {inserted} 篇（含 Priority 來源）")
 

@@ -34,6 +34,7 @@ GEMINI_MODELS = [
 ]
 
 MAX_REPOS     = 6      # 每週最多儲存幾個（免費 API quota 考量）
+BATCH_SIZE    = 2      # 每批分析幾個 repo（減少 Gemini 呼叫次數）
 DUP_THRESHOLD = 0.65
 
 SEARCH_QUERIES = [
@@ -47,7 +48,7 @@ SEARCH_QUERIES = [
 
 # ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
 _gemini_last_call: float = 0.0
-_GEMINI_MIN_INTERVAL = 7.0  # 秒（10 RPM = 6s/call，留 1s buffer）
+_GEMINI_MIN_INTERVAL = 12.0  # 秒（5 RPM，安全緩衝空間 5 RPM）
 
 
 def _gemini_wait() -> None:
@@ -269,80 +270,127 @@ def build_prompt(repo: dict, readme: str, releases: str) -> str:
 _RETRYABLE = {429, 503, 529}
 
 
-def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
+def _call_gemini_text(prompt: str, max_tokens: int = 1400) -> tuple[str, str]:
     """
-    Gemini Fallback chain：依序試 GEMINI_MODELS（全免費）。
-    - 429/503/529（過載）→ 同 model retry（最多 3 次，60/120/240s backoff）
-    - 404（model 不存在）→ 換下一個
-    - 其他非 2xx → 印出 body，直接 raise
+    Gemini Fallback chain：每個 model 只嘗試一次，回傳 (raw_text, model_used)。
+    - 429/503/529 → 直接換下一個 model（各 model 配額獨立）
+    - 404 → 換下一個 model
     """
-    prompt = build_prompt(repo, readme, releases)
     last_error = "（未嘗試）"
 
     for model in GEMINI_MODELS:
-        print(f"    嘗試模型：{model}")
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
-        retry_delays = [60, 120, 240]  # 429 需要等夠久
+        _gemini_wait()
+        resp = httpx.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+            },
+            timeout=90,
+        )
 
-        for attempt in range(3):
-            _gemini_wait()  # ← 全域 rate limit：確保每次至少間隔 7s
-            resp = httpx.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 1400, "temperature": 0.2},
-                },
-                timeout=90,
-            )
+        if resp.status_code in _RETRYABLE:
+            last_error = f"{model} 限流 ({resp.status_code})"
+            print(f"    ⚠ {model} {resp.status_code}，換下一個 model")
+            time.sleep(3)
+            continue
 
-            # 過載 → 同 model retry
-            if resp.status_code in _RETRYABLE:
-                if attempt < 2:
-                    wait = retry_delays[attempt]
-                    print(f"    Gemini {resp.status_code}，等待 {wait}s 後重試...")
-                    time.sleep(wait)
-                    continue
-                else:
-                    last_error = f"{model} 過載超過重試次數"
-                    break
+        if resp.status_code == 404:
+            last_error = f"{model} 404 not found"
+            print(f"    ⚠ {model} 不存在，換下一個 model")
+            continue
 
-            # 404 → model 不存在，換下一個
-            if resp.status_code == 404:
-                last_error = f"{model} → 404 not found"
-                print(f"    ✗ Model 不存在，換下一個")
-                break
+        if not resp.is_success:
+            body = resp.text[:400]
+            raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
 
-            # 其他非 2xx → 印出 body，raise
-            if not resp.is_success:
-                body = resp.text[:400]
-                print(f"    Gemini {resp.status_code}: {body}")
-                raise RuntimeError(f"Gemini {resp.status_code} ({model}): {body}")
+        try:
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as e:
+            last_error = f"{model} response 結構異常: {e}"
+            print(f"    ⚠ {model} 結構異常，換下一個 model")
+            continue
 
-            # ✅ 成功 — 取出文字
-            try:
-                raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except (KeyError, IndexError, TypeError) as e:
-                last_error = f"{model} response 結構異常: {e}"
-                print(f"    ✗ Response 結構異常，換下一個 model: {e}")
-                break  # 換下一個 model
-
-            raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
-            raw = re.sub(r"^```\s*", "", raw)
-            raw = re.sub(r"```\s*$", "", raw).strip()
-
-            try:
-                result = _safe_json_loads(raw)
-            except (ValueError, Exception) as e:
-                last_error = f"{model} JSON 解析失敗: {e}"
-                print(f"    ✗ JSON 解析失敗，換下一個 model")
-                break  # 換下一個 model
-
-            result["_model_used"] = model
-            print(f"    ✓ 使用模型：{model}")
-            return result
+        raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"^```\s*", "", raw)
+        raw = re.sub(r"```\s*$", "", raw).strip()
+        print(f"    ✓ 使用模型：{model}")
+        return raw, model
 
     raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
+
+
+def _call_gemini_once(prompt: str, max_tokens: int = 1400) -> dict:
+    """Gemini 呼叫 → dict（單一 JSON 物件）。"""
+    raw, model = _call_gemini_text(prompt, max_tokens)
+    try:
+        result = _safe_json_loads(raw)
+        result["_model_used"] = model
+        return result
+    except (ValueError, Exception) as e:
+        raise RuntimeError(f"JSON 解析失敗 ({model}): {e}")
+
+
+def gemini_analyze(repo: dict, readme: str, releases: str) -> dict:
+    """單一 repo 分析（使用共用 fallback chain）。"""
+    prompt = build_prompt(repo, readme, releases)
+    return _call_gemini_once(prompt, max_tokens=1400)
+
+
+def gemini_analyze_batch(repos_data: list[tuple[dict, str, str]]) -> list[dict | None]:
+    """批次分析 2-3 個 repo，單次 Gemini 呼叫，回傳與輸入等長的結果 list。"""
+    n = len(repos_data)
+    sections: list[str] = []
+    for i, (repo, readme, releases) in enumerate(repos_data):
+        section_lines = [
+            "=== 專案 " + str(i + 1) + " ===",
+            "名稱：" + repo["full_name"],
+            "Stars：" + str(repo["stars"]) + "  Forks：" + str(repo["forks"]),
+            "語言：" + repo["language"],
+            "Topics：" + ", ".join(repo["topics"][:10]),
+            "描述：" + (repo["description"] or "（無）"),
+            "",
+            "README（前 3000 字）：",
+            (readme or "（無）")[:3000],
+            "",
+            "Release Notes：",
+            (releases or "（無）")[:800],
+        ]
+        sections.append("\n".join(section_lines))
+
+    prompt = (
+        "你是 AI 技術策展人，請深度分析以下 " + str(n) + " 個 GitHub 開源專案，"
+        "用**繁體中文**撰寫知識卡片。\n\n"
+        "嚴格輸出 JSON array，長度必須 = " + str(n) + "（順序對應專案編號）：\n"
+        '[\n'
+        '  {\n'
+        '    "title":       "直接用專案全名即可",\n'
+        '    "summary":     "繁體中文一句話說明（30-80字）",\n'
+        '    "highlights":  "3-5個技術亮點，Markdown 條列（- 開頭），每點 20-50字",\n'
+        '    "architecture":"架構概述：核心技術、設計模式（50-120字）",\n'
+        '    "use_case":    "最適合的使用場景（30-70字）",\n'
+        '    "compared_to": "與同類工具差異（30-70字），無明顯對比則空字串",\n'
+        '    "quality":     5\n'
+        '  }\n'
+        ']\n\n'
+        + "\n\n".join(sections)
+        + "\n\n只回傳 JSON array，不要 markdown code fence，不要其他文字。"
+    )
+
+    try:
+        raw, model = _call_gemini_text(prompt, max_tokens=n * 1500)
+        results = json.loads(raw)
+        if not isinstance(results, list) or len(results) != n:
+            print(f"  ✗ 批次回傳格式錯誤（expected list[{n}], got {type(results).__name__}[{len(results) if isinstance(results, list) else '?'}]）")
+            return [None] * n
+        for r in results:
+            r["_model_used"] = model
+        return results
+    except Exception as e:
+        print(f"  ✗ 批次分析失敗: {e}")
+        return [None] * n
 
 
 def validate_analysis(out: dict) -> str | None:
@@ -407,63 +455,68 @@ def main() -> None:
         print("  沒有新 repos，結束。")
         return
 
-    # ── Step 3：逐個深度分析 + 存入 DB ──────────────────────────────────────
+    # ── Step 3：批次深度分析 + 存入 DB ──────────────────────────────────────
     inserted = 0
-    for repo in new_repos:
-        print(f"\n  ▶ {repo['full_name']} ({repo['stars']:,} ⭐)")
+    for batch_start in range(0, len(new_repos), BATCH_SIZE):
+        batch = new_repos[batch_start:batch_start + BATCH_SIZE]
+        print(f"\n  ── 批次 {batch_start // BATCH_SIZE + 1}：{', '.join(r['full_name'] for r in batch)}")
 
-        # Fetch 補充資料
-        readme   = fetch_readme(repo["full_name"])
-        releases = fetch_releases(repo["full_name"])
-        print(f"    README: {len(readme)} 字 | Releases: {'有' if releases else '無'}")
+        # Fetch 補充資料（不消耗 Gemini 配額，可連續 fetch）
+        repos_data: list[tuple[dict, str, str]] = []
+        for repo in batch:
+            readme   = fetch_readme(repo["full_name"])
+            releases = fetch_releases(repo["full_name"])
+            print(f"    {repo['full_name']}: README {len(readme)} 字 | Releases {'有' if releases else '無'}")
+            repos_data.append((repo, readme, releases))
 
-        # Claude 分析
-        try:
-            analysis = gemini_analyze(repo, readme, releases)
-        except Exception as e:
-            print(f"    ✗ 分析失敗: {e}")
-            continue
+        # 單次 Gemini 呼叫分析整批
+        analyses = gemini_analyze_batch(repos_data)
 
-        err = validate_analysis(analysis)
-        if err:
-            print(f"    ✗ 輸出不合規（{err}），跳過")
-            continue
+        for (repo, _, _), analysis in zip(repos_data, analyses):
+            if analysis is None:
+                print(f"    ✗ {repo['full_name']} 分析失敗，跳過")
+                continue
 
-        # 標題相似度重複檢查
-        _, is_suspect, dup_of = check_duplicate(repo["url"], repo["full_name"])
+            err = validate_analysis(analysis)
+            if err:
+                print(f"    ✗ {repo['full_name']} 輸出不合規（{err}），跳過")
+                continue
 
-        item = {
-            "type":             "repo",
-            "title":            repo["full_name"],
-            "url":              repo["url"],
-            "summary":          analysis["summary"],
-            "content":          build_content(analysis),
-            "category_id":      open_source_cat_id,
-            "source":           "GitHub Trending",
-            "quality":          analysis["quality"],
-            "is_pinned":        analysis["quality"] >= 5,
-            "duplicate_suspect": is_suspect,
-            "duplicate_of":     dup_of,
-            "metadata": {
-                "stars":        repo["stars"],
-                "forks":        repo["forks"],
-                "language":     repo["language"],
-                "topics":       repo["topics"],
-                "license":      repo["license"],
-                "tags":         [t.lower() for t in repo["topics"][:4]],
-                "fetched_at":   datetime.now(timezone.utc).isoformat(),
-                "ai_processed": True,
-                "model":        analysis.get("_model_used", GEMINI_MODELS[-1]),
-            },
-        }
+            # 標題相似度重複檢查
+            _, is_suspect, dup_of = check_duplicate(repo["url"], repo["full_name"])
 
-        try:
-            supabase_req("POST", "/items", item)
-            inserted += 1
-            dup_flag = " ⚠ [重複嫌疑]" if is_suspect else ""
-            print(f"    ✓ Q{analysis['quality']}/5 [{repo['language']}]{dup_flag}")
-        except Exception as e:
-            print(f"    ✗ 插入失敗: {e}")
+            item = {
+                "type":             "repo",
+                "title":            repo["full_name"],
+                "url":              repo["url"],
+                "summary":          analysis["summary"],
+                "content":          build_content(analysis),
+                "category_id":      open_source_cat_id,
+                "source":           "GitHub Trending",
+                "quality":          analysis["quality"],
+                "is_pinned":        analysis["quality"] >= 5,
+                "duplicate_suspect": is_suspect,
+                "duplicate_of":     dup_of,
+                "metadata": {
+                    "stars":        repo["stars"],
+                    "forks":        repo["forks"],
+                    "language":     repo["language"],
+                    "topics":       repo["topics"],
+                    "license":      repo["license"],
+                    "tags":         [t.lower() for t in repo["topics"][:4]],
+                    "fetched_at":   datetime.now(timezone.utc).isoformat(),
+                    "ai_processed": True,
+                    "model":        analysis.get("_model_used", GEMINI_MODELS[-1]),
+                },
+            }
+
+            try:
+                supabase_req("POST", "/items", item)
+                inserted += 1
+                dup_flag = " ⚠ [重複嫌疑]" if is_suspect else ""
+                print(f"    ✓ {repo['full_name']} Q{analysis['quality']}/5 [{repo['language']}]{dup_flag}")
+            except Exception as e:
+                print(f"    ✗ {repo['full_name']} 插入失敗: {e}")
 
         # rate limit 由 _gemini_wait() 統一處理，此處不額外 sleep
 

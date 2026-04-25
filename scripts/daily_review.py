@@ -21,7 +21,7 @@ SAMPLE_SIZE = 8
 
 # ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────
 _gemini_last_call: float = 0.0
-_GEMINI_MIN_INTERVAL = 7.0
+_GEMINI_MIN_INTERVAL = 12.0
 
 
 def _gemini_wait() -> None:
@@ -79,38 +79,33 @@ def _safe_json_loads(raw: str) -> list | dict:
 
 
 def gemini(prompt: str) -> str:
+    """Gemini Fallback chain：每個 model 只嘗試一次，429 → 直接換下一個。"""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 800, "temperature": 0.3},
     }
-    retry_delays = [60, 120, 240]
     last_error = "（未嘗試）"
     for model in GEMINI_MODELS:
         url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
-        for attempt in range(3):
-            _gemini_wait()
-            resp = httpx.post(url, json=payload, timeout=60)
-            if resp.status_code in {429, 503, 529}:
-                if attempt < 2:
-                    wait = retry_delays[attempt]
-                    print(f"  Gemini {resp.status_code}，等待 {wait}s 後重試 ({model})...")
-                    time.sleep(wait)
-                    continue
-                last_error = f"{model} 過載超過重試次數"
-                break  # 換下一個 model
-            if resp.status_code == 404:
-                last_error = f"{model} 404 not found"
-                print(f"  Model {model} 不存在，換下一個")
-                break
-            if not resp.is_success:
-                raise RuntimeError(f"Gemini {resp.status_code}: {resp.text[:200]}")
-            # 取出文字，結構異常時換下一個 model
-            try:
-                return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except (KeyError, IndexError, TypeError) as e:
-                last_error = f"{model} response 結構異常: {e}"
-                print(f"  Model {model} response 結構異常，換下一個")
-                break  # ← break 換下一個 model，不 raise
+        _gemini_wait()
+        resp = httpx.post(url, json=payload, timeout=60)
+        if resp.status_code in {429, 503, 529}:
+            last_error = f"{model} 限流 ({resp.status_code})"
+            print(f"  ⚠ {model} {resp.status_code}，換下一個 model")
+            time.sleep(3)
+            continue
+        if resp.status_code == 404:
+            last_error = f"{model} 404 not found"
+            print(f"  ⚠ {model} 不存在，換下一個 model")
+            continue
+        if not resp.is_success:
+            raise RuntimeError(f"Gemini {resp.status_code}: {resp.text[:200]}")
+        try:
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as e:
+            last_error = f"{model} response 結構異常: {e}"
+            print(f"  ⚠ {model} 結構異常，換下一個 model")
+            continue
     raise RuntimeError(f"所有 Gemini 模型均失敗，最後錯誤：{last_error}")
 
 
