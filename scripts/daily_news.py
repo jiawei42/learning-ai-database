@@ -205,12 +205,12 @@ def _extract_text(resp_json: dict) -> str:
 
 
 def _safe_json_loads(raw: str) -> list | dict:
-    """解析 JSON，自動修復字串內未跳脫的換行／Tab 字元（Gemini markdown 常見問題）。"""
+    """解析 JSON，自動修復字串內未跳脫的控制字元（Gemini 常見問題）。"""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    # Character-by-character fix for unescaped control chars inside strings
+    # Character-by-character fix: escape ALL control chars inside strings
     out: list[str] = []
     in_str = False
     esc = False
@@ -224,12 +224,8 @@ def _safe_json_loads(raw: str) -> list | dict:
         elif ch == '"':
             out.append(ch)
             in_str = not in_str
-        elif in_str and ch == "\n":
-            out.append("\\n")
-        elif in_str and ch == "\r":
-            out.append("\\r")
-        elif in_str and ch == "\t":
-            out.append("\\t")
+        elif in_str and ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
         else:
             out.append(ch)
     try:
@@ -297,7 +293,7 @@ def call_gemini(
 
 
 def parse_json_from_text(raw: str) -> list | dict:
-    """從 Gemini 回應萃取 JSON（容錯解析 + 自動修復換行）。"""
+    """從 Gemini 回應萃取 JSON（容錯解析 + 控制字元修復 + 截斷恢復）。"""
     raw = raw.strip()
     # 移除 markdown code fence
     raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
@@ -308,7 +304,34 @@ def parse_json_from_text(raw: str) -> list | dict:
         m = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", raw)
         if m:
             raw = m.group(1)
-    return _safe_json_loads(raw)
+    try:
+        return _safe_json_loads(raw)
+    except ValueError:
+        pass
+    # 最後防線：bracket-counting 逐一提取完整 {...} 物件
+    # 適用於截斷的 JSON array（如 [{...}, {...}, 截斷...）
+    extracted: list[dict] = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    obj = json.loads(raw[start : i + 1])
+                    if isinstance(obj, dict):
+                        extracted.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = -1
+    if extracted:
+        print(f"  ⚠ JSON 截斷，regex 恢復 {len(extracted)} 個物件")
+        return extracted
+    raise ValueError(f"JSON 解析完全失敗: {raw[:200]}")
 
 
 # ── Phase 1：Gemini + Google Search 搜尋今日一般新聞 ──────────────────────────
@@ -394,7 +417,7 @@ def scan_priority_source(source: dict, today: str) -> list[dict]:
                 content=content.replace("{", "{{").replace("}", "}}"),
                 base_url=source["base_url"],
             ),
-            max_tokens=800,
+            max_tokens=1500,
         )
         articles = parse_json_from_text(raw)
         if isinstance(articles, list):

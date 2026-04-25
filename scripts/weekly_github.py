@@ -125,12 +125,8 @@ def _safe_json_loads(raw: str) -> dict:
         elif ch == '"':
             out.append(ch)
             in_str = not in_str
-        elif in_str and ch == "\n":
-            out.append("\\n")
-        elif in_str and ch == "\r":
-            out.append("\\r")
-        elif in_str and ch == "\t":
-            out.append("\\t")
+        elif in_str and ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
         else:
             out.append(ch)
     try:
