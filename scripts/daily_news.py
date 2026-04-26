@@ -350,24 +350,26 @@ def parse_json_from_text(raw: str) -> list | dict:
 
 # ── Phase 1：Gemini + Google Search 搜尋今日一般新聞 ──────────────────────────
 _DISCOVER_PROMPT = (
-    "Today is {today}. Please use Google Search to find AI news articles "
-    "published TODAY ({today}) or in the past 24 hours. Focus on: "
-    "AI model releases, LLM research breakthroughs, AI tools, industry developments. "
-    "Summarize what you found briefly."
+    "Today is {today}. Use Google Search to find AI news published TODAY ({today}) "
+    "or in the past 24 hours (AI models, LLM research, AI tools, industry news). "
+    "List each article as a numbered markdown item with its full URL:\n"
+    "1. [Article Title](URL)\n"
+    "2. [Article Title](URL)\n"
+    "Include up to {limit} articles. Only include articles from today."
 )
 
 
 def discover_news_via_search(today: str) -> list[dict]:
     """
-    Phase 1：Gemini + Google Search，從 groundingMetadata 取文章。
-
-    使用 groundingMetadata.groundingChunks（API response 的結構化欄位），
-    完全繞過文字 JSON 解析，避免 vertexaisearch 代理 URL 截斷問題。
+    Phase 1：Gemini + Google Search，三條備援路徑：
+    1. groundingMetadata.groundingChunks（結構化，最可靠）
+    2. regex 提取文字中的 markdown 連結 [title](url)
+    3. JSON 解析（若 Gemini 偶爾返回 JSON 格式）
     """
     print("  [Google Search] 搜尋今日 AI 新聞...")
     payload = {
-        "contents": [{"parts": [{"text": _DISCOVER_PROMPT.format(today=today)}]}],
-        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.1},
+        "contents": [{"parts": [{"text": _DISCOVER_PROMPT.format(today=today, limit=MAX_NEWS)}]}],
+        "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.1},
         "tools": [{"google_search": {}}],
     }
 
@@ -400,38 +402,59 @@ def discover_news_via_search(today: str) -> list[dict]:
         except (KeyError, IndexError):
             break
 
-        # ── 主要路徑：從 groundingMetadata 提取（不需解析 JSON 文字）────────
-        chunks = (
-            candidate.get("groundingMetadata", {})
-            .get("groundingChunks", [])
-        )
-        articles: list[dict] = []
-        seen: set[str] = set()
-        for chunk in chunks:
-            web = chunk.get("web", {})
-            uri   = web.get("uri", "").strip()
-            title = web.get("title", "").strip()
-            if uri and title and uri not in seen:
-                seen.add(uri)
-                articles.append({"title": title, "url": uri, "source": "Web Search"})
+        grounding = candidate.get("groundingMetadata", {})
+        print(f"    groundingMetadata keys: {list(grounding.keys())}")
 
-        if articles:
-            print(f"    找到 {len(articles)} 篇候選（groundingMetadata）")
-            return articles[:MAX_NEWS]
+        # ── 路徑 1：groundingChunks（結構化 API 欄位）─────────────────────
+        chunks = grounding.get("groundingChunks", [])
+        if chunks:
+            seen: set[str] = set()
+            articles: list[dict] = []
+            for chunk in chunks:
+                web = chunk.get("web", {})
+                uri   = web.get("uri", "").strip()
+                title = web.get("title", "").strip()
+                if uri and title and uri not in seen:
+                    seen.add(uri)
+                    articles.append({"title": title, "url": uri, "source": "Web Search"})
+            if articles:
+                print(f"    找到 {len(articles)} 篇候選（groundingChunks）")
+                return articles[:MAX_NEWS]
 
-        # ── 備用路徑：嘗試解析文字回應 ─────────────────────────────────────
+        # ── 取文字回應（路徑 2 & 3 共用）─────────────────────────────────
         try:
             text = _extract_text(data)
-            parsed = parse_json_from_text(text)
-            if isinstance(parsed, list):
-                valid = [a for a in parsed if a.get("url") and a.get("title")]
-                if valid:
-                    print(f"    找到 {len(valid)} 篇候選（文字解析）")
-                    return valid[:MAX_NEWS]
-        except Exception as e:
-            print(f"    文字解析也失敗: {e}")
+        except Exception:
+            text = ""
 
-        print(f"    {model} 未回傳有效文章")
+        if text:
+            # 路徑 2：regex 提取 markdown 連結 [title](url)
+            seen2: set[str] = set()
+            md_articles: list[dict] = []
+            for title, url in re.findall(
+                r'\[([^\]]{5,200})\]\((https?://\S{15,})\)', text
+            ):
+                url = url.rstrip(').,;')
+                if url not in seen2:
+                    seen2.add(url)
+                    md_articles.append({"title": title.strip(), "url": url, "source": "Web Search"})
+            if md_articles:
+                print(f"    找到 {len(md_articles)} 篇候選（文字 markdown 連結）")
+                return md_articles[:MAX_NEWS]
+
+            # 路徑 3：JSON 解析
+            try:
+                parsed = parse_json_from_text(text)
+                if isinstance(parsed, list):
+                    valid = [a for a in parsed if a.get("url") and a.get("title")]
+                    if valid:
+                        print(f"    找到 {len(valid)} 篇候選（JSON 解析）")
+                        return valid[:MAX_NEWS]
+            except Exception:
+                pass
+
+            print(f"    未找到有效連結（回應前 120 字：{text[:120]!r}）")
+
         break  # 已取得 response，不需再換 model
 
     print("    Google Search 未找到今日文章")
