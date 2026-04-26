@@ -104,18 +104,19 @@ _HEADERS = {
 }
 
 
-def fetch_text(url: str, max_chars: int = 8000) -> tuple[str, bool]:
-    """Fetch URL，回傳 (純文字, 是否成功)。"""
+def fetch_text(url: str, max_chars: int = 8000) -> tuple[str, bool, str]:
+    """Fetch URL，回傳 (純文字, 是否成功, 最終 URL)。follow_redirects 自動解析代理 URL。"""
     try:
         resp = httpx.get(
             url, headers=_HEADERS,
             timeout=15, follow_redirects=True,
         )
+        final_url = str(resp.url)
         if resp.status_code == 200:
-            return strip_html(resp.text)[:max_chars], True
+            return strip_html(resp.text)[:max_chars], True, final_url
     except Exception as e:
         print(f"    fetch_text 失敗 ({url[:60]}): {e}")
-    return "", False
+    return "", False, url
 
 
 # ── Supabase ───────────────────────────────────────────────────────────────────
@@ -308,12 +309,25 @@ def parse_json_from_text(raw: str) -> list | dict:
         return _safe_json_loads(raw)
     except ValueError:
         pass
-    # 最後防線：bracket-counting 逐一提取完整 {...} 物件
-    # 適用於截斷的 JSON array（如 [{...}, {...}, 截斷...）
+    # 最後防線：string-aware bracket-counting，逐一提取完整 {...} 物件
+    # 適用於截斷的 JSON array，且正確跳過字串內的 { } 字元
     extracted: list[dict] = []
     depth = 0
     start = -1
+    in_str = False
+    esc = False
     for i, ch in enumerate(raw):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\" and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
         if ch == "{":
             if depth == 0:
                 start = i
@@ -322,10 +336,10 @@ def parse_json_from_text(raw: str) -> list | dict:
             depth -= 1
             if depth == 0 and start >= 0:
                 try:
-                    obj = json.loads(raw[start : i + 1])
+                    obj = _safe_json_loads(raw[start : i + 1])
                     if isinstance(obj, dict):
                         extracted.append(obj)
-                except json.JSONDecodeError:
+                except (ValueError, Exception):
                     pass
                 start = -1
     if extracted:
@@ -335,47 +349,92 @@ def parse_json_from_text(raw: str) -> list | dict:
 
 
 # ── Phase 1：Gemini + Google Search 搜尋今日一般新聞 ──────────────────────────
-_DISCOVER_PROMPT = """\
-Today is {today}.
-
-你是 AI 新聞策展人。請用 Google Search 搜尋 **今天（{today}）或過去 24 小時內**的最新 AI 新聞，重點關注：
-1. https://www.technice.com.tw/category/issues/ai/ （台灣科技新聞）
-2. https://technews.tw/category/ai/ （TechNews 科技新報）
-3. 其他重大 AI 新聞：模型發布、重要研究、產業動態
-
-重要規則：
-- **只回傳今天（{today}）或過去 24 小時發布的文章**
-- 如果真的沒有新文章，回傳空陣列 []
-- 不要回傳超過 {limit} 篇
-- 優先選擇有實質內容的文章（非廣告、非轉載）
-
-嚴格 JSON 輸出（不要 markdown code fence，不要任何其他文字）：
-[
-  {{
-    "title": "文章標題（保留原文語言）",
-    "url": "完整文章 URL",
-    "source": "媒體名稱或網域"
-  }}
-]
-"""
+_DISCOVER_PROMPT = (
+    "Today is {today}. Please use Google Search to find AI news articles "
+    "published TODAY ({today}) or in the past 24 hours. Focus on: "
+    "AI model releases, LLM research breakthroughs, AI tools, industry developments. "
+    "Summarize what you found briefly."
+)
 
 
 def discover_news_via_search(today: str) -> list[dict]:
-    """Phase 1：用 Gemini Google Search 找今日一般新聞。"""
+    """
+    Phase 1：Gemini + Google Search，從 groundingMetadata 取文章。
+
+    使用 groundingMetadata.groundingChunks（API response 的結構化欄位），
+    完全繞過文字 JSON 解析，避免 vertexaisearch 代理 URL 截斷問題。
+    """
     print("  [Google Search] 搜尋今日 AI 新聞...")
-    try:
-        raw = call_gemini(
-            _DISCOVER_PROMPT.format(today=today, limit=MAX_NEWS),
-            use_search=True,
-            max_tokens=1500,
+    payload = {
+        "contents": [{"parts": [{"text": _DISCOVER_PROMPT.format(today=today)}]}],
+        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.1},
+        "tools": [{"google_search": {}}],
+    }
+
+    for model in GEMINI_MODELS:
+        if model.startswith("gemini-1.5"):
+            continue  # 1.5 不支援 google_search grounding
+
+        api_url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_KEY}"
+        _gemini_wait()
+        try:
+            resp = httpx.post(api_url, json=payload, timeout=120)
+        except Exception as e:
+            print(f"  ⚠ 請求失敗 ({model}): {e}")
+            continue
+
+        if resp.status_code in {429, 503, 529}:
+            print(f"  ⚠ {model} {resp.status_code}，換下一個 model")
+            time.sleep(3)
+            continue
+        if resp.status_code == 404:
+            print(f"  ⚠ {model} 不存在，換下一個 model")
+            continue
+        if not resp.is_success:
+            print(f"  ⚠ {model} {resp.status_code}，停止搜尋")
+            break
+
+        data = resp.json()
+        try:
+            candidate = data["candidates"][0]
+        except (KeyError, IndexError):
+            break
+
+        # ── 主要路徑：從 groundingMetadata 提取（不需解析 JSON 文字）────────
+        chunks = (
+            candidate.get("groundingMetadata", {})
+            .get("groundingChunks", [])
         )
-        articles = parse_json_from_text(raw)
-        if isinstance(articles, list):
-            valid = [a for a in articles if a.get("url") and a.get("title")]
-            print(f"    找到 {len(valid)} 篇候選")
-            return valid[:MAX_NEWS]
-    except Exception as e:
-        print(f"    Google Search 搜尋失敗: {e}")
+        articles: list[dict] = []
+        seen: set[str] = set()
+        for chunk in chunks:
+            web = chunk.get("web", {})
+            uri   = web.get("uri", "").strip()
+            title = web.get("title", "").strip()
+            if uri and title and uri not in seen:
+                seen.add(uri)
+                articles.append({"title": title, "url": uri, "source": "Web Search"})
+
+        if articles:
+            print(f"    找到 {len(articles)} 篇候選（groundingMetadata）")
+            return articles[:MAX_NEWS]
+
+        # ── 備用路徑：嘗試解析文字回應 ─────────────────────────────────────
+        try:
+            text = _extract_text(data)
+            parsed = parse_json_from_text(text)
+            if isinstance(parsed, list):
+                valid = [a for a in parsed if a.get("url") and a.get("title")]
+                if valid:
+                    print(f"    找到 {len(valid)} 篇候選（文字解析）")
+                    return valid[:MAX_NEWS]
+        except Exception as e:
+            print(f"    文字解析也失敗: {e}")
+
+        print(f"    {model} 未回傳有效文章")
+        break  # 已取得 response，不需再換 model
+
+    print("    Google Search 未找到今日文章")
     return []
 
 
@@ -403,7 +462,7 @@ Today is {today}.
 def scan_priority_source(source: dict, today: str) -> list[dict]:
     """Phase 2：Fetch Priority 來源首頁，找今日文章。"""
     print(f"  [Priority] 掃描 {source['name']}...")
-    content, ok = fetch_text(source["url"], max_chars=6000)
+    content, ok, _ = fetch_text(source["url"], max_chars=6000)
     if not ok or not content:
         print(f"    ✗ 無法取得頁面")
         return []
@@ -461,10 +520,14 @@ def analyze_article(article: dict) -> dict | None:
     """Fetch 原文 + Gemini 深度分析，生成結構化知識卡片。"""
     url     = article.get("url", "")
     title   = article.get("title", "")
-    source  = article.get("source", urlparse(url).netloc if url else "")
 
-    # Fetch 原文
-    content, ok = fetch_text(url, max_chars=7000)
+    # Fetch 原文（follow_redirects 自動解析 vertexaisearch 代理 URL）
+    content, ok, final_url = fetch_text(url, max_chars=7000)
+    real_netloc = urlparse(final_url).netloc
+    source = article.get("source") or real_netloc or urlparse(url).netloc or ""
+    if source == "vertexaisearch.cloud.google.com":
+        source = real_netloc  # 已重導向，取真實網域
+
     if not ok or len(content) < 80:
         # Fallback：用 title + source 讓 Gemini 憑知識推測
         content = (
@@ -499,8 +562,11 @@ def analyze_articles_batch(articles: list[dict]) -> list[dict | None]:
     for i, article in enumerate(articles):
         url    = article.get("url", "")
         title  = article.get("title", "")
-        source = article.get("source", urlparse(url).netloc if url else "")
-        content, ok = fetch_text(url, max_chars=2200)
+        content, ok, final_url = fetch_text(url, max_chars=2200)
+        real_netloc = urlparse(final_url).netloc
+        source = article.get("source") or real_netloc or urlparse(url).netloc or ""
+        if source == "vertexaisearch.cloud.google.com":
+            source = real_netloc
         if not ok or len(content) < 80:
             content = "（無法取得完整頁面內容，請根據標題與來源推測分析）"
         sections.append(
@@ -629,7 +695,9 @@ def main() -> None:
         for article, analysis in zip(batch, analyses):
             url    = article.get("url", "")
             title  = article.get("title", "")
-            source = article.get("source", urlparse(url).netloc if url else "Daily AI News")
+            raw_source = article.get("source", "")
+            source = (raw_source if raw_source and raw_source != "Web Search"
+                      else urlparse(url).netloc or "Daily AI News")
 
             if not analysis:
                 print(f"    ✗ 跳過（分析失敗）: {title[:50]}")
