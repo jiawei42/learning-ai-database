@@ -23,6 +23,13 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+# 自動載入 .env 檔（本地開發用，不影響 GitHub Actions）
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # 沒裝 python-dotenv 也能用（GitHub Actions 直接注入環境變數）
+
 # ── 環境變數 ──────────────────────────────────────────────────────────────────
 GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]

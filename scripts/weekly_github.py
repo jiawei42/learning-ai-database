@@ -18,6 +18,12 @@ from urllib.parse import quote
 
 import httpx
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ── 環境變數 ──────────────────────────────────────────────────────────────────
 GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
