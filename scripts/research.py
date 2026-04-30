@@ -40,7 +40,8 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",      # 輕量版，有獨立 quota
+    "gemini-1.5-flash-latest",    # 1.5-flash 已改名，舊名會 404
 ]
 
 MAX_REPOS = 5   # 每次最多分析幾個 GitHub repos
@@ -255,6 +256,19 @@ def fetch_webpage(url: str, max_chars: int = 5000) -> str:
     return ""
 
 
+def _fallback_queries(topic: str) -> list[str]:
+    """
+    當 Gemini 規劃失敗時，從主題萃取英文關鍵字作為 GitHub 搜尋詞。
+    "playwright 瀏覽器自動化" → ["playwright"]
+    "RAG vector database"    → ["RAG vector database"]
+    """
+    english_words = re.findall(r'[A-Za-z][A-Za-z0-9\-\.]*', topic)
+    if english_words:
+        return [" ".join(english_words)]
+    # 全中文 → 直接回傳原字串（讓 GitHub 處理，結果可能不理想但不報錯）
+    return [topic]
+
+
 # ── Step 1：Gemini 規劃研究策略 ────────────────────────────────────────────────
 def plan_research(topic: str, cat_slugs: list[str]) -> dict:
     """讓 Gemini 根據主題決定 GitHub 搜尋詞 + 推薦文件 URL + 最佳分類。"""
@@ -380,9 +394,9 @@ def research(topic: str) -> None:
         plan = plan_research(topic, cat_slugs)
     except Exception as e:
         print(f"  ✗ 規劃失敗（{e}），使用預設策略")
-        plan = {"github_queries": [topic], "doc_urls": [], "category": "tools-frameworks"}
+        plan = {"github_queries": _fallback_queries(topic), "doc_urls": [], "category": "tools-frameworks"}
 
-    github_queries: list[str] = plan.get("github_queries", [topic])[:3]
+    github_queries: list[str] = plan.get("github_queries", _fallback_queries(topic))[:3]
     doc_urls: list[str]       = [u for u in plan.get("doc_urls", []) if u.startswith("http")][:MAX_DOCS]
     category: str             = plan.get("category", "tools-frameworks")
     cat_id: str | None        = cat_ids.get(category) or cat_ids.get("tools-frameworks")

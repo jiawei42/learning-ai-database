@@ -22,7 +22,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest"]
 SAMPLE_SIZE = 8
 
 # ── Gemini Rate Limiter（免費版 ~10 RPM）────────────────────────────────────────

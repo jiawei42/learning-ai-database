@@ -36,7 +36,8 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODELS = [
     "gemini-2.5-flash",   # 最新最強（免費額度）
     "gemini-2.0-flash",   # 穩定備用
-    "gemini-1.5-flash",   # 保底，最穩定
+    "gemini-2.0-flash-lite",      # 輕量備用
+    "gemini-1.5-flash-latest",   # 保底
 ]
 
 MAX_REPOS     = 6      # 每週最多儲存幾個（免費 API quota 考量）

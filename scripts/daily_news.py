@@ -38,7 +38,8 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash-latest",
 ]
 
 MAX_NEWS      = 6     # 一般新聞上限（Priority 不計）；降低以節省 Gemini 配額
